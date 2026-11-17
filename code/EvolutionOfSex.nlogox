@@ -1,0 +1,1341 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 7.0.3" snapToGrid="true">
+  <code><![CDATA[;------------------------------------------------------------------------------------
+;:::::: Evolution of Sex ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+globals [
+  ;; allele domains
+  allele-color-types
+  allele-size-types
+  parasite-size-types
+
+  ;; cached UI toggles
+  last-show-parasites
+
+  ;; parasite population bounds
+  parasite-min-pop
+  parasite-max-pop
+
+  ;; strategy trails (patch shading)
+  trail-radius
+  trail-fade
+
+  ;; setup scaling
+  initial-parasite-fraction
+
+  ;; cached constants
+  patch-count
+]
+
+breed [ snails snail ]
+breed [ parasites parasite ]
+
+snails-own [
+  allele-color-1
+  allele-color-2
+  allele-size-1
+  allele-size-2
+  sex
+  infecting-parasite
+]
+
+parasites-own [
+  my-host
+]
+
+patches-own [
+  asexual-trail
+  sexual-trail
+]
+
+;------------------------------------------------------------------------------------
+;:::::: Setup :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to setup
+  clear-all
+
+  setup-global-parameters
+  setup-patches
+  setup-snails
+  setup-parasites
+  
+  update-parasite-visibility
+  update-trail-visibility
+  reset-ticks
+end
+
+to setup-global-parameters
+  set patch-count count patches
+
+  set last-show-parasites show-parasites
+
+  set allele-size-types [ 1 3 ]
+  set allele-color-types [ orange blue ]
+  setup-parasite-size-types
+
+  set parasite-min-pop 10
+  set parasite-max-pop 50000
+
+  set trail-radius 3
+  set trail-fade 0.90
+
+  set initial-parasite-fraction 0.1
+end
+
+to setup-parasite-size-types
+  set parasite-size-types []
+  foreach allele-size-types [ i ->
+    foreach allele-size-types [ j ->
+      set parasite-size-types lput ((i + j) / 2) parasite-size-types
+    ]
+  ]
+  set parasite-size-types remove-duplicates parasite-size-types
+end
+
+to setup-patches
+  ask patches [
+    set pcolor white
+    set asexual-trail 0
+    set sexual-trail 0
+  ]
+end
+
+to setup-snails
+  let n-total round snail-carrying-capacity
+  let n-sexual round (n-total * (initial-percent-sexual / 100))
+  let n-asexual (n-total - n-sexual)
+
+  create-snails n-total [
+    set hidden? false
+    set label ""
+    set infecting-parasite nobody
+    setxy random-xcor random-ycor
+
+    ifelse who < n-sexual
+    [ set sex coin-flip-sex ]
+    [ set sex "asexual" ]
+
+    set allele-color-1 initialize-color-allele
+    set allele-color-2 initialize-color-allele
+    set allele-size-1 initialize-size-allele
+    set allele-size-2 initialize-size-allele
+
+    set-size-shape-color
+  ]
+end
+
+to setup-parasites
+  if parasite-infection-chance > 0 [
+    create-parasites (initial-parasite-fraction * snail-carrying-capacity) [
+      initialize-parasite
+    ]
+  ]
+end
+
+to initialize-parasite
+  set label ""
+  set hidden? (not show-parasites)
+  set shape "circle"
+  setxy random-xcor random-ycor
+  set color ((one-of allele-color-types) - 2)
+  set size (one-of parasite-size-types) / 3
+  set my-host nobody
+end
+
+to-report coin-flip-sex
+  ifelse random-float 1.0 < 0.5 [ report "male" ] [ report "female" ]
+end
+
+to-report initialize-color-allele
+  report one-of allele-color-types
+end
+
+to-report initialize-size-allele
+  report one-of allele-size-types
+end
+
+to set-size-shape-color
+  set size (allele-size-1 + allele-size-2) / 2
+  set shape get-snail-shape
+
+  let idx1 position allele-color-1 allele-color-types
+  let idx2 position allele-color-2 allele-color-types
+  ifelse idx1 >= idx2
+  [ set color allele-color-1 ]
+  [ set color allele-color-2 ]
+end
+
+to-report get-snail-shape
+  if sex = "asexual" [ ifelse heading < 180 [ report "asexual right" ] [ report "asexual left" ] ]
+  if sex = "male"    [ ifelse heading < 180 [ report "male right"    ] [ report "male left"    ] ]
+  if sex = "female"  [ ifelse heading < 180 [ report "female right"  ] [ report "female left"  ] ]
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Go ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to go
+  if ticks = stop-simulation-at [ stop ]
+
+  ;; mating radius (% world width -> patches)
+  let mate-radius ((sexual-mating-radius / 100) * world-width)
+
+  ;; Beverton–Holt density dependence: fertility declines with density but never hits zero
+  let snailN count snails
+  let snailK snail-carrying-capacity
+
+  let density-factor 0
+  ifelse snailK > 0
+  [ set density-factor (snailN / snailK) ]
+  [ set density-factor 0 ]
+
+  let effective-snail-fertility (snail-fertility-rate / (1 + density-factor))
+
+  ;; snails step
+  ask snails [
+    snails-wander
+    snail-reproduce-logistic effective-snail-fertility mate-radius
+    set shape get-snail-shape
+  ]
+
+  ;; hard cap at carrying capacity (removes excess snails, if any)
+  let afterN count snails
+  if (snailK > 0 and afterN > snailK) [
+    ask n-of (afterN - snailK) snails [ remove-snail ]
+  ]
+  
+  ;; parasites step (only if infection is enabled)
+  if parasite-infection-chance > 0 [
+    parasites-go
+    enforce-parasite-bounds
+  ]
+  
+  update-parasite-visibility
+  update-trail-visibility
+  
+  tick
+end
+
+to-report compute-encounter-prob [mate-radius male-count]
+  if male-count = 0 [ report 0 ]
+
+  ;; male density (males per patch)
+  let male-density (male-count / patch-count)
+
+  ;; expected males within radius
+  let area (pi * mate-radius * mate-radius)
+  let lambda (male-density * area)
+
+  ;; Poisson: P(>=1) = 1 - exp(-lambda)
+  report (1 - exp (0 - lambda))
+end
+
+to update-parasite-visibility
+  if show-parasites != last-show-parasites [
+    ask parasites [ set hidden? (not show-parasites) ]
+    set last-show-parasites show-parasites
+  ]
+end
+
+to update-trail-visibility
+  ifelse show-strategies
+  [ update-snail-trails ]
+  [ ask patches [ set pcolor white ] ]
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Strategy trails ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to update-snail-trails
+  ;; fade
+  ask patches [
+    set asexual-trail (asexual-trail * trail-fade)
+    set sexual-trail  (sexual-trail  * trail-fade)
+
+    if asexual-trail < 0.01 [ set asexual-trail 0 ]
+    if sexual-trail  < 0.01 [ set sexual-trail  0 ]
+  ]
+
+  ;; deposit
+  ask snails [
+    if sex = "asexual" [
+      ask patches in-radius trail-radius [ set asexual-trail 1 ]
+    ]
+    if sex != "asexual" [
+      ask patches in-radius trail-radius [ set sexual-trail 1 ]
+    ]
+  ]
+
+  ;; render (two colors only)
+  ask patches [
+    ifelse sexual-trail > 0
+    [ set pcolor 7 ]          ;; sexual = darker gray
+    [
+      ifelse asexual-trail > 0
+      [ set pcolor 9 ]        ;; asexual = lighter gray
+      [ set pcolor white ]
+    ]
+  ]
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Snails ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to snails-wander
+  right random 90
+  left random 90
+  fd 0.3
+  if infecting-parasite != nobody [
+    ask infecting-parasite [ move-to myself ]
+  ]
+end
+
+to snail-reproduce-logistic [effective-snail-fertility mate-radius]
+  if random-float 1.0 < effective-snail-fertility [
+    if infecting-parasite = nobody [
+      if sex = "asexual" [
+        snails-reproduce-asexually
+      ]
+      if sex = "female" [
+        snails-reproduce-sexually mate-radius
+      ]
+    ]
+  ]
+end
+
+to snails-reproduce-sexually [mate-radius]
+  let local-males snails in-radius mate-radius with [ sex = "male" ]
+  if any? local-males [
+    let mate one-of local-males
+    hatch-snails 1 [
+      set allele-color-1 one-of (list allele-color-1 ([allele-color-1] of mate))
+      set allele-color-2 one-of (list allele-color-2 ([allele-color-2] of mate))
+      set allele-size-1  one-of (list allele-size-1  ([allele-size-1]  of mate))
+      set allele-size-2  one-of (list allele-size-2  ([allele-size-2]  of mate))
+
+      set sex coin-flip-sex
+      snails-update-for-mutation
+      set-size-shape-color
+    ]
+  ]
+end
+
+to snails-reproduce-asexually
+  hatch-snails 1 [
+    snails-update-for-mutation
+    set-size-shape-color
+  ]
+end
+
+to snails-update-for-mutation
+  if random-float 1.0 < snail-mutation-rate [ set allele-color-1 initialize-color-allele ]
+  if random-float 1.0 < snail-mutation-rate [ set allele-color-2 initialize-color-allele ]
+  if random-float 1.0 < snail-mutation-rate [ set allele-size-1 initialize-size-allele ]
+  if random-float 1.0 < snail-mutation-rate [ set allele-size-2 initialize-size-allele ]
+end
+
+to remove-snail
+  if infecting-parasite != nobody [ ask infecting-parasite [ die ] ]
+  die
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Parasites :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to parasites-go
+  let snailN count snails
+  let parasiteN count parasites
+
+  ;; compute crowding + effective fertility once per tick
+  let effective-parasite-fertility parasite-fertility-rate
+  if (snailN > 0 and per-snail-parasite-capacity > 0) [
+    let pps (parasiteN / snailN)
+    set effective-parasite-fertility (parasite-fertility-rate / (1 + (pps / per-snail-parasite-capacity)))
+  ]
+
+  ask parasites [
+    parasite-wander
+    parasites-reproduce effective-parasite-fertility
+    parasite-death
+  ]
+end
+
+to enforce-parasite-bounds
+  let current count parasites
+
+  if current > parasite-max-pop [
+    ask n-of (current - parasite-max-pop) parasites [ die ]
+  ]
+
+  if current < parasite-min-pop [
+    create-parasites (parasite-min-pop - current) [
+      initialize-parasite
+    ]
+  ]
+end
+
+to parasite-wander
+  if my-host != nobody [ stop ]
+  right random 30
+  left random 30
+  fd 0.7
+  attempt-infection
+end
+
+to parasites-reproduce [effective-parasite-fertility]
+  if my-host = nobody [ stop ]
+
+  if random-float 1.0 < effective-parasite-fertility [
+    hatch-parasites 1 [
+      if random-float 1.0 < parasite-mutation-rate [
+        set color ((one-of allele-color-types) - 2)
+        set size (one-of parasite-size-types) / 3
+        set my-host nobody
+      ]
+    ]
+  ]
+end
+
+to attempt-infection
+  let local-snails snails-here with [ infecting-parasite = nobody ]
+  if any? local-snails [
+    let target one-of local-snails
+    let matching? ( [color] of target = (color + 2) ) and ( [size]  of target = (size * 3) )
+    if matching? [
+      if random-float 100 < parasite-infection-chance [
+        ask target [ set infecting-parasite myself ]
+        set my-host target
+      ]
+    ]
+  ]
+end
+
+to parasite-death
+  if random-float 1.0 < parasite-mortality-rate [
+    if my-host != nobody [ ask my-host [ remove-snail ] ]
+    die
+  ]
+end
+]]></code>
+  <widgets>
+    <view x="285" wrappingAllowedX="true" y="200" frameRate="30.0" minPycor="0" height="509" showTickCounter="true" patchSize="1.6833333333333333" fontSize="10" wrappingAllowedY="true" width="509" tickCounterLabel="timesteps" maxPycor="299" updateMode="1" maxPxcor="299" minPxcor="0"></view>
+    <plot x="815" autoPlotX="true" yMax="100.0" autoPlotY="false" yAxis="percent of individuals" y="17" xMin="0.0" height="315" legend="true" xMax="10.0" yMin="0.0" width="319" xAxis="timesteps" display="Sexual vs Asexual Strategies">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="asexual" color="-4539718" legend="true">
+        <setup></setup>
+        <update>if (any? snails) [ plot ( 100 * (count snails with [ sex = "asexual" ]) / count snails ) ]</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="sexual" color="-11053225" legend="true">
+        <setup></setup>
+        <update>if (any? snails) [ plot ( 100 * (count snails with [ sex != "asexual" ]) / count snails ) ]</update>
+      </pen>
+    </plot>
+    <plot x="1145" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="number of individuals" y="15" xMin="0.0" height="315" legend="true" xMax="10.0" yMin="0.0" width="326" xAxis="timesteps" display="Parasite Phenotypes">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="blue-small" color="-8020277" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = blue - 2) and (size = 1 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-medium" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = blue - 2) and (size = 2 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-large" color="-14730904" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = blue - 2) and (size = 3 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-small" color="-612749" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = orange - 2) and (size = 1 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-medium" color="-955883" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = orange - 2) and (size = 2 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-large" color="-6995700" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = orange - 2) and (size = 3 / 3)])</update>
+      </pen>
+    </plot>
+    <slider x="285" step="1000" y="20" max="10000" width="510" display="stop-simulation-at" height="50" min="0" direction="Horizontal" default="5000.0" variable="stop-simulation-at" units="timesteps"></slider>
+    <switch x="285" y="80" height="40" on="false" variable="show-parasites" width="250" display="show-parasites"></switch>
+    <switch x="545" y="80" height="40" on="false" variable="show-strategies" width="250" display="show-strategies"></switch>
+    <monitor x="285" precision="17" y="130" height="60" fontSize="11" width="120" display="# parasites">count parasites</monitor>
+    <monitor x="675" precision="17" y="130" height="60" fontSize="11" width="120" display="sexual : asexual">ifelse-value ( any? snails ) [ precision ( count snails with [ sex = "male" or sex = "female" ] / ( count snails with [ sex = "asexual" ] + 1 ) ) 3 ] [ 0 ]</monitor>
+    <monitor x="545" precision="17" y="130" height="60" fontSize="11" width="120" display="# asexual snails">count snails with [ sex = "asexual" ]</monitor>
+    <monitor x="415" precision="17" y="130" height="60" fontSize="11" width="120" display="# sexual snails">count snails with [ sex = "male" or sex = "female" ]</monitor>
+    <plot x="815" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="number of individuals" y="345" xMin="0.0" height="325" legend="true" xMax="10.0" yMin="0.0" width="319" xAxis="timesteps" display="Asexual Phenotypes">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="blue-small" color="-8020277" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 1) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-medium" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 2) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-large" color="-14730904" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 3) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-small" color="-612749" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and (size = 1) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-medium" color="-955883" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and (size = 2) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-large" color="-6995700" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and ( size = 3 ) and (sex = "asexual")])</update>
+      </pen>
+    </plot>
+    <plot x="1145" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="number of individuals" y="345" xMin="0.0" height="325" legend="true" xMax="10.0" yMin="0.0" width="326" xAxis="timesteps" display="Sexual Phenotypes">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="blue-small" color="-8020277" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 1) and (sex != "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-medium" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 2) and (sex != "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-large" color="-14730904" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 3) and (sex != "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-small" color="-612749" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and (size = 1) and (sex != "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-medium" color="-955883" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange) and (size = 2) and (sex != "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-large" color="-6995700" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and (size = 3) and (sex != "asexual")])</update>
+      </pen>
+    </plot>
+    <button x="60" y="20" height="50" disableUntilTicks="false" forever="false" kind="Observer" width="80" sizeVersion="0">setup</button>
+    <slider x="15" step=".01" y="650" max="1.0" width="250" display="parasite-mutation-rate" height="50" min="0" direction="Horizontal" default="0.1" variable="parasite-mutation-rate"></slider>
+    <slider x="15" step=".001" y="595" max="1" width="250" display="parasite-mortality-rate" height="50" min="0" direction="Horizontal" default="0.01" variable="parasite-mortality-rate"></slider>
+    <slider x="15" step=".001" y="540" max="1" width="250" display="parasite-fertility-rate" height="50" min="0" direction="Horizontal" default="0.5" variable="parasite-fertility-rate"></slider>
+    <slider x="15" step="1" y="485" max="30" width="250" display="per-snail-parasite-capacity" height="50" min="0" direction="Horizontal" default="5.0" variable="per-snail-parasite-capacity"></slider>
+    <slider x="15" step="1" y="430" max="100" width="250" display="parasite-infection-chance" height="50" min="0" direction="Horizontal" default="70.0" variable="parasite-infection-chance" units="%"></slider>
+    <note x="20" y="395" backgroundDark="0" fontSize="11" width="250" markdown="false" height="25" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">------------------------- Parasites ------------------------</note>
+    <button x="150" y="20" height="50" disableUntilTicks="false" forever="true" kind="Observer" width="80" sizeVersion="0">go</button>
+    <note x="20" y="85" backgroundDark="0" fontSize="11" width="247" markdown="false" height="26" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">--------------------------- Hosts ---------------------------</note>
+    <slider x="15" step="1" y="335" max="100" width="250" display="sexual-mating-radius" height="50" min="0" direction="Horizontal" default="50.0" variable="sexual-mating-radius" units="% world"></slider>
+    <slider x="15" step=".0001" y="280" max="0.01" width="250" display="snail-mutation-rate" height="50" min="0" direction="Horizontal" default="0.001" variable="snail-mutation-rate"></slider>
+    <slider x="15" step="100" y="170" max="10000" width="250" display="snail-carrying-capacity" height="50" min="0" direction="Horizontal" default="5000.0" variable="snail-carrying-capacity"></slider>
+    <slider x="15" step="1" y="115" max="100" width="250" display="initial-percent-sexual" height="50" min="0" direction="Horizontal" default="50.0" variable="initial-percent-sexual" units="%"></slider>
+    <slider x="15" step="0.001" y="225" max="0.1" width="250" display="snail-fertility-rate" height="50" min="0.001" direction="Horizontal" default="0.01" variable="snail-fertility-rate"></slider>
+  </widgets>
+  <info># Evolution of Sex
+
+## WHAT IS IT?
+
+Evolution of Sex is a NetLogo model that explores the evolutionary advantages and disadvantages of sexual and asexual reproduction. It addresses a classic evolutionary question:
+
+*“Why do we have sex?”*
+
+At first glance, asexual reproduction appears superior. Asexual individuals pass on 100% of their genes, do not need to find a mate, and reproduce efficiently without sharing genetic material. In contrast, sexual reproduction appears costly: individuals pass on only 50% of their genes, must locate and compete for mates, and invest time and energy in reproduction.
+
+From this perspective, sexual reproduction seems evolutionarily inefficient. Yet sexual reproduction is widespread in nature. This model demonstrates how, under certain ecological conditions—particularly in the presence of parasites—sexual reproduction can outperform asexual reproduction.
+
+When parasites are introduced, they impose selective pressure on common genotypes. Asexual individuals produce genetically identical offspring, meaning that if one individual is vulnerable to a parasite, all of its clones are vulnerable. Sexual reproduction reshuffles genetic material, generating new combinations that parasites have not yet adapted to exploit. In this ongoing evolutionary “arms race,” sexual populations may be better able to persist.
+
+
+## HOW IT WORKS
+
+When the model is initialized, a population of **Snails** and **Parasites** is created.
+
+#### Snails
+
+Snails are diploid organisms that can reproduce either sexually or asexually. Sexual snails exist as males and females, and females must locate a male within the sexual-mating-radius (expressed as a percentage of world width) in order to reproduce. Asexual snails reproduce clonally and do not require a mate. Each snail has a genotype that determines its phenotype, defined by two traits: color (Blue or Orange, with Blue dominant) and size (Small, Medium, or Large, determined by codominant alleles). Together these traits create six possible phenotypes. Snail reproduction is density dependent and regulated by snail-carrying-capacity, which sets the ecological ceiling on population size. The snail-fertility-rate controls baseline reproduction, while snail-mutation-rate introduces genetic variation during reproduction.
+
+#### Parasites
+
+Parasites are haploid organisms that reproduce asexually and move randomly across the environment. Each parasite carries a single infection strategy corresponding to one of the six snail phenotypes. Infection occurs only when a parasite encounters a snail of matching size and color, and successful infection depends on parasite-infection-chance. Once infected, a snail becomes a reproductive environment for the parasite, eventually dying as parasite offspring emerge. Parasite population dynamics are governed by parasite-fertility-rate, parasite-mutation-rate, and parasite-mortality-rate. Population growth is density dependent through per-snail-parasite-capacity, which limits parasite reproduction when parasites become crowded relative to available hosts.
+
+
+## HOW TO USE IT
+
+Use the **show-parasites** switch to toggle parasite visibility. Parasites continue to infect snails whether or not they are displayed.
+
+The parameter **stop-simulation-at** sets the number of ticks at which the simulation automatically stops running. This allows trials to be compared at a consistent time horizon. 
+
+The switch **show-strategies** overlays light and dark gray trails on the landscape to visualize spatial patterns of reproductive strategy. Light gray patches indicate areas recently occupied by asexual snails, while dark gray patches indicate areas recently occupied by sexual snails. These trails fade over time and provide a visual representation of how the two strategies spread and compete across space.
+
+
+#### Snail Parameters
+
+**initial-percent-sexual**  
+Determines what percentage of Snails begin the simulation as sexual. The remainder begin as asexual.
+
+**snail-carrying-capacity**  
+Sets the ecological limit on total Snail population size.
+
+**snail-fertility-rate**  
+Controls how frequently Snails reproduce under low-density conditions.
+
+**snail-mutation-rate**  
+Determines how often alleles mutate during reproduction.
+
+**sexual-mating-radius (%)**  
+Sets the maximum distance (as a percent of world width) within which females can locate males for mating.
+
+#### Parasite Parameters
+
+**parasite-mortality-rate**  
+Controls how frequently parasites die per tick.
+
+**parasite-infection-chance (%)**  
+Determines the probability of infection upon contact with a matching Snail.
+
+**parasite-fertility-rate**  
+Controls how rapidly parasites reproduce inside infected Snails.
+
+**parasite-mutation-rate**  
+Determines how frequently parasite offspring mutate to a different infection strategy.
+
+**per-snail-parasite-capacity**  
+Limits parasite reproduction when parasites become crowded relative to snails.
+
+#### Buttons
+
+**SETUP** initializes a new population of Snails and Parasites based on current parameter settings.
+
+**GO** starts or stops the simulation.
+
+#### Output
+
+The model generates graphical output tracking:
+
+- Relative abundance of sexual and asexual strategies  
+- Parasite phenotype frequencies  
+- Asexual phenotype frequencies  
+- Sexual phenotype frequencies  
+
+These graphs allow you to observe how parasite pressure shapes genetic composition and reproductive strategy over time.
+
+
+
+## THINGS TO NOTICE
+
+This model demonstrates that sexual reproduction can be advantageous under certain ecological conditions. As you explore the parameter space, consider:
+
+- How does initial-percent-sexual affect outcomes?
+- How do snail-carrying-capacity and snail-fertility-rate affect persistence?
+- How do snail-mutation-rate and parasite-mutation-rate influence which strategy dominates?
+- Under what parasite conditions do snails go extinct?
+- When populations are 100% sexual or 100% asexual, which strategy withstands parasite pressure more effectively?
+
+Pay close attention to how snail phenotypes and parasite infection strategies fluctuate together over time. Look for cyclical dynamics consistent with Red Queen coevolution.
+
+
+
+## HOW TO CITE
+
+Crouse, Kristin (2026). “Evolution of Sex” (Version 1.2.1). CoMSES Computational Model Library. Retrieved from: https://www.comses.net/codebases/5051/releases/1.2.1/
+
+
+
+## ACKNOWLEDGEMENTS
+
+Conceptual inspiration provided by M. L. Wilson.
+
+
+
+## COPYRIGHT AND LICENSE
+
+© 2016–2026 K. N. Crouse
+
+This model was created at the University of Minnesota as part of a series of models illustrating principles in biological evolution.
+
+This model is released under the **Apache License, Version 2.0**.  
+You may use, modify, and redistribute this model in accordance with the terms of that license.
+
+A copy of the license should be included with this distribution.  
+If not, it is available at: https://www.apache.org/licenses/LICENSE-2.0
+
+For questions about use or adaptation, contact: **kncrouse@gmail.com**
+
+
+
+
+
+
+
+
+
+
+
+</info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="asexual left" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="50" y="159"></point>
+        <point x="30" y="83"></point>
+        <point x="35" y="82"></point>
+        <point x="60" y="149"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="69" y="146"></point>
+        <point x="71" y="72"></point>
+        <point x="78" y="73"></point>
+        <point x="81" y="148"></point>
+      </polygon>
+      <circle x="12" y="53" marked="true" color="-1920102913" diameter="36" filled="true"></circle>
+      <circle x="55" y="43" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="17" y="58" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="61" y="49" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="24" y="66" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="67" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="154" y="193"></point>
+        <point x="121" y="178"></point>
+        <point x="108" y="166"></point>
+        <point x="103" y="130"></point>
+        <point x="104" y="99"></point>
+        <point x="119" y="70"></point>
+        <point x="134" y="50"></point>
+        <point x="148" y="37"></point>
+        <point x="163" y="29"></point>
+        <point x="181" y="24"></point>
+        <point x="205" y="27"></point>
+        <point x="226" y="44"></point>
+        <point x="250" y="74"></point>
+        <point x="265" y="121"></point>
+        <point x="255" y="178"></point>
+        <point x="231" y="209"></point>
+        <point x="215" y="208"></point>
+        <point x="194" y="204"></point>
+        <point x="163" y="196"></point>
+        <point x="153" y="169"></point>
+        <point x="154" y="155"></point>
+        <point x="159" y="142"></point>
+        <point x="167" y="136"></point>
+        <point x="179" y="132"></point>
+        <point x="194" y="133"></point>
+        <point x="204" y="139"></point>
+        <point x="211" y="149"></point>
+        <point x="212" y="161"></point>
+        <point x="209" y="172"></point>
+        <point x="204" y="177"></point>
+        <point x="197" y="179"></point>
+        <point x="190" y="176"></point>
+        <point x="186" y="170"></point>
+        <point x="187" y="160"></point>
+        <point x="180" y="167"></point>
+        <point x="182" y="177"></point>
+        <point x="190" y="185"></point>
+        <point x="201" y="186"></point>
+        <point x="209" y="182"></point>
+        <point x="215" y="175"></point>
+        <point x="218" y="165"></point>
+        <point x="219" y="153"></point>
+        <point x="214" y="140"></point>
+        <point x="201" y="129"></point>
+        <point x="185" y="125"></point>
+        <point x="174" y="127"></point>
+        <point x="162" y="132"></point>
+        <point x="152" y="140"></point>
+        <point x="147" y="152"></point>
+        <point x="146" y="163"></point>
+        <point x="149" y="178"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="47" y="152"></point>
+        <point x="41" y="165"></point>
+        <point x="37" y="185"></point>
+        <point x="36" y="201"></point>
+        <point x="39" y="216"></point>
+        <point x="46" y="230"></point>
+        <point x="52" y="244"></point>
+        <point x="78" y="244"></point>
+        <point x="134" y="247"></point>
+        <point x="190" y="244"></point>
+        <point x="270" y="245"></point>
+        <point x="285" y="245"></point>
+        <point x="276" y="236"></point>
+        <point x="269" y="233"></point>
+        <point x="265" y="230"></point>
+        <point x="260" y="224"></point>
+        <point x="250" y="220"></point>
+        <point x="243" y="218"></point>
+        <point x="232" y="215"></point>
+        <point x="208" y="213"></point>
+        <point x="180" y="206"></point>
+        <point x="163" y="203"></point>
+        <point x="133" y="189"></point>
+        <point x="112" y="178"></point>
+        <point x="90" y="154"></point>
+        <point x="85" y="147"></point>
+        <point x="77" y="143"></point>
+        <point x="63" y="141"></point>
+        <point x="50" y="149"></point>
+        <point x="46" y="154"></point>
+      </polygon>
+      <circle x="28" y="174" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="29" y="198" marked="true" color="-1920102913" diameter="24" filled="true"></circle>
+      <circle x="40" y="217" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="34" y="152" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+    </shape>
+    <shape name="asexual right" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="250" y="159"></point>
+        <point x="270" y="83"></point>
+        <point x="265" y="82"></point>
+        <point x="240" y="149"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="231" y="146"></point>
+        <point x="229" y="72"></point>
+        <point x="222" y="73"></point>
+        <point x="219" y="148"></point>
+      </polygon>
+      <circle x="252" y="53" marked="true" color="-1920102913" diameter="36" filled="true"></circle>
+      <circle x="207" y="43" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="257" y="58" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="213" y="49" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="264" y="66" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="221" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="146" y="193"></point>
+        <point x="179" y="178"></point>
+        <point x="192" y="166"></point>
+        <point x="197" y="130"></point>
+        <point x="196" y="99"></point>
+        <point x="181" y="70"></point>
+        <point x="166" y="50"></point>
+        <point x="152" y="37"></point>
+        <point x="137" y="29"></point>
+        <point x="119" y="24"></point>
+        <point x="95" y="27"></point>
+        <point x="74" y="44"></point>
+        <point x="50" y="74"></point>
+        <point x="35" y="121"></point>
+        <point x="45" y="178"></point>
+        <point x="69" y="209"></point>
+        <point x="85" y="208"></point>
+        <point x="106" y="204"></point>
+        <point x="137" y="196"></point>
+        <point x="147" y="169"></point>
+        <point x="146" y="155"></point>
+        <point x="141" y="142"></point>
+        <point x="133" y="136"></point>
+        <point x="121" y="132"></point>
+        <point x="106" y="133"></point>
+        <point x="96" y="139"></point>
+        <point x="89" y="149"></point>
+        <point x="88" y="161"></point>
+        <point x="91" y="172"></point>
+        <point x="96" y="177"></point>
+        <point x="103" y="179"></point>
+        <point x="110" y="176"></point>
+        <point x="114" y="170"></point>
+        <point x="113" y="160"></point>
+        <point x="120" y="167"></point>
+        <point x="118" y="177"></point>
+        <point x="110" y="185"></point>
+        <point x="99" y="186"></point>
+        <point x="91" y="182"></point>
+        <point x="85" y="175"></point>
+        <point x="82" y="165"></point>
+        <point x="81" y="153"></point>
+        <point x="86" y="140"></point>
+        <point x="99" y="129"></point>
+        <point x="115" y="125"></point>
+        <point x="126" y="127"></point>
+        <point x="138" y="132"></point>
+        <point x="148" y="140"></point>
+        <point x="153" y="152"></point>
+        <point x="154" y="163"></point>
+        <point x="151" y="178"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="253" y="152"></point>
+        <point x="259" y="165"></point>
+        <point x="263" y="185"></point>
+        <point x="264" y="201"></point>
+        <point x="261" y="216"></point>
+        <point x="254" y="230"></point>
+        <point x="248" y="244"></point>
+        <point x="222" y="244"></point>
+        <point x="166" y="247"></point>
+        <point x="110" y="244"></point>
+        <point x="30" y="245"></point>
+        <point x="15" y="245"></point>
+        <point x="24" y="236"></point>
+        <point x="31" y="233"></point>
+        <point x="35" y="230"></point>
+        <point x="40" y="224"></point>
+        <point x="50" y="220"></point>
+        <point x="57" y="218"></point>
+        <point x="68" y="215"></point>
+        <point x="92" y="213"></point>
+        <point x="120" y="206"></point>
+        <point x="137" y="203"></point>
+        <point x="167" y="189"></point>
+        <point x="188" y="178"></point>
+        <point x="210" y="154"></point>
+        <point x="215" y="147"></point>
+        <point x="223" y="143"></point>
+        <point x="237" y="141"></point>
+        <point x="250" y="149"></point>
+        <point x="254" y="154"></point>
+      </polygon>
+      <circle x="245" y="174" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="247" y="198" marked="true" color="-1920102913" diameter="24" filled="true"></circle>
+      <circle x="233" y="217" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="239" y="152" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="female left" rotatable="false" editableColorIndex="0">
+      <circle x="65" y="71" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <circle x="24" y="80" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="255" y="240"></point>
+      </polygon>
+      <circle x="13" y="56" marked="true" color="-1920102913" diameter="30" filled="true"></circle>
+      <circle x="56" y="47" marked="true" color="-1920102913" diameter="30" filled="true"></circle>
+      <circle x="17" y="60" marked="false" color="-1" diameter="22" filled="true"></circle>
+      <circle x="61" y="52" marked="false" color="-1" diameter="20" filled="true"></circle>
+      <circle x="21" y="65" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="64" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="146" y="186"></point>
+        <point x="121" y="173"></point>
+        <point x="106" y="158"></point>
+        <point x="100" y="128"></point>
+        <point x="106" y="98"></point>
+        <point x="119" y="77"></point>
+        <point x="136" y="62"></point>
+        <point x="152" y="51"></point>
+        <point x="173" y="45"></point>
+        <point x="195" y="44"></point>
+        <point x="229" y="53"></point>
+        <point x="257" y="75"></point>
+        <point x="275" y="108"></point>
+        <point x="280" y="149"></point>
+        <point x="263" y="184"></point>
+        <point x="241" y="203"></point>
+        <point x="194" y="203"></point>
+        <point x="155" y="189"></point>
+        <point x="145" y="164"></point>
+        <point x="142" y="141"></point>
+        <point x="149" y="119"></point>
+        <point x="164" y="107"></point>
+        <point x="181" y="102"></point>
+        <point x="201" y="103"></point>
+        <point x="221" y="114"></point>
+        <point x="228" y="130"></point>
+        <point x="229" y="146"></point>
+        <point x="222" y="163"></point>
+        <point x="211" y="170"></point>
+        <point x="196" y="168"></point>
+        <point x="186" y="162"></point>
+        <point x="182" y="152"></point>
+        <point x="187" y="143"></point>
+        <point x="196" y="137"></point>
+        <point x="188" y="135"></point>
+        <point x="177" y="143"></point>
+        <point x="175" y="158"></point>
+        <point x="185" y="172"></point>
+        <point x="202" y="177"></point>
+        <point x="218" y="176"></point>
+        <point x="230" y="163"></point>
+        <point x="236" y="147"></point>
+        <point x="236" y="130"></point>
+        <point x="230" y="114"></point>
+        <point x="214" y="101"></point>
+        <point x="194" y="95"></point>
+        <point x="173" y="96"></point>
+        <point x="153" y="105"></point>
+        <point x="139" y="121"></point>
+        <point x="135" y="139"></point>
+        <point x="136" y="158"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="45" y="135"></point>
+        <point x="30" y="153"></point>
+        <point x="25" y="175"></point>
+        <point x="24" y="194"></point>
+        <point x="27" y="210"></point>
+        <point x="33" y="225"></point>
+        <point x="48" y="239"></point>
+        <point x="53" y="240"></point>
+        <point x="105" y="240"></point>
+        <point x="174" y="243"></point>
+        <point x="276" y="240"></point>
+        <point x="285" y="240"></point>
+        <point x="278" y="230"></point>
+        <point x="269" y="220"></point>
+        <point x="260" y="215"></point>
+        <point x="251" y="212"></point>
+        <point x="242" y="211"></point>
+        <point x="195" y="210"></point>
+        <point x="147" y="194"></point>
+        <point x="118" y="180"></point>
+        <point x="88" y="149"></point>
+        <point x="78" y="136"></point>
+        <point x="68" y="132"></point>
+        <point x="58" y="132"></point>
+        <point x="51" y="133"></point>
+      </polygon>
+      <circle x="31" y="129" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="64" y="124" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="65" y="112" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="27" y="118" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="25" y="108" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="66" y="100" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="24" y="97" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="24" y="88" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <circle x="66" y="90" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="66" y="81" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+    </shape>
+    <shape name="female right" rotatable="false" editableColorIndex="0">
+      <circle x="223" y="71" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <circle x="264" y="80" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="240"></point>
+        <point x="60" y="210"></point>
+        <point x="45" y="240"></point>
+      </polygon>
+      <circle x="257" y="56" marked="true" color="-1920102913" diameter="30" filled="true"></circle>
+      <circle x="214" y="47" marked="true" color="-1920102913" diameter="30" filled="true"></circle>
+      <circle x="261" y="60" marked="false" color="-1" diameter="22" filled="true"></circle>
+      <circle x="219" y="52" marked="false" color="-1" diameter="20" filled="true"></circle>
+      <circle x="267" y="65" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="224" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="154" y="186"></point>
+        <point x="179" y="173"></point>
+        <point x="194" y="158"></point>
+        <point x="200" y="128"></point>
+        <point x="194" y="98"></point>
+        <point x="181" y="77"></point>
+        <point x="164" y="62"></point>
+        <point x="148" y="51"></point>
+        <point x="127" y="45"></point>
+        <point x="105" y="44"></point>
+        <point x="71" y="53"></point>
+        <point x="43" y="75"></point>
+        <point x="25" y="108"></point>
+        <point x="20" y="149"></point>
+        <point x="37" y="184"></point>
+        <point x="59" y="203"></point>
+        <point x="106" y="203"></point>
+        <point x="145" y="189"></point>
+        <point x="155" y="164"></point>
+        <point x="158" y="141"></point>
+        <point x="151" y="119"></point>
+        <point x="136" y="107"></point>
+        <point x="119" y="102"></point>
+        <point x="99" y="103"></point>
+        <point x="79" y="114"></point>
+        <point x="72" y="130"></point>
+        <point x="71" y="146"></point>
+        <point x="78" y="163"></point>
+        <point x="89" y="170"></point>
+        <point x="104" y="168"></point>
+        <point x="114" y="162"></point>
+        <point x="118" y="152"></point>
+        <point x="113" y="143"></point>
+        <point x="104" y="137"></point>
+        <point x="112" y="135"></point>
+        <point x="123" y="143"></point>
+        <point x="125" y="158"></point>
+        <point x="115" y="172"></point>
+        <point x="98" y="177"></point>
+        <point x="82" y="176"></point>
+        <point x="70" y="163"></point>
+        <point x="64" y="147"></point>
+        <point x="64" y="130"></point>
+        <point x="70" y="114"></point>
+        <point x="86" y="101"></point>
+        <point x="106" y="95"></point>
+        <point x="127" y="96"></point>
+        <point x="147" y="105"></point>
+        <point x="161" y="121"></point>
+        <point x="165" y="139"></point>
+        <point x="164" y="158"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="255" y="135"></point>
+        <point x="270" y="153"></point>
+        <point x="275" y="175"></point>
+        <point x="276" y="194"></point>
+        <point x="273" y="210"></point>
+        <point x="267" y="225"></point>
+        <point x="252" y="239"></point>
+        <point x="247" y="240"></point>
+        <point x="195" y="240"></point>
+        <point x="126" y="243"></point>
+        <point x="24" y="240"></point>
+        <point x="15" y="240"></point>
+        <point x="22" y="230"></point>
+        <point x="31" y="220"></point>
+        <point x="40" y="215"></point>
+        <point x="49" y="212"></point>
+        <point x="58" y="211"></point>
+        <point x="105" y="210"></point>
+        <point x="153" y="194"></point>
+        <point x="182" y="180"></point>
+        <point x="212" y="149"></point>
+        <point x="222" y="136"></point>
+        <point x="232" y="132"></point>
+        <point x="242" y="132"></point>
+        <point x="249" y="133"></point>
+      </polygon>
+      <circle x="253" y="129" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="220" y="124" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="219" y="112" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="257" y="118" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="261" y="108" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="220" y="100" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="262" y="97" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="264" y="88" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <circle x="220" y="90" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="222" y="81" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+    </shape>
+    <shape name="male left" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="255" y="240"></point>
+      </polygon>
+      <circle x="18" y="78" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="60" y="71" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="40" y="100"></point>
+        <point x="45" y="135"></point>
+        <point x="30" y="180"></point>
+        <point x="75" y="240"></point>
+        <point x="285" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="195" y="210"></point>
+        <point x="150" y="195"></point>
+        <point x="120" y="180"></point>
+        <point x="90" y="150"></point>
+        <point x="79" y="91"></point>
+        <point x="75" y="135"></point>
+        <point x="60" y="135"></point>
+      </polygon>
+      <circle x="25" y="86" marked="false" color="-1" diameter="24" filled="true"></circle>
+      <circle x="67" y="79" marked="false" color="-1" diameter="24" filled="true"></circle>
+      <circle x="72" y="85" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="151" y="189"></point>
+        <point x="121" y="174"></point>
+        <point x="107" y="158"></point>
+        <point x="105" y="75"></point>
+        <point x="150" y="30"></point>
+        <point x="210" y="15"></point>
+        <point x="270" y="60"></point>
+        <point x="285" y="150"></point>
+        <point x="242" y="204"></point>
+        <point x="195" y="203"></point>
+        <point x="158" y="191"></point>
+        <point x="145" y="150"></point>
+        <point x="170" y="115"></point>
+        <point x="213" y="114"></point>
+        <point x="228" y="135"></point>
+        <point x="228" y="165"></point>
+        <point x="189" y="165"></point>
+        <point x="188" y="146"></point>
+        <point x="181" y="146"></point>
+        <point x="182" y="172"></point>
+        <point x="234" y="172"></point>
+        <point x="236" y="134"></point>
+        <point x="219" y="106"></point>
+        <point x="195" y="105"></point>
+        <point x="167" y="106"></point>
+        <point x="147" y="134"></point>
+        <point x="135" y="150"></point>
+      </polygon>
+      <circle x="30" y="92" marked="false" color="255" diameter="12" filled="true"></circle>
+    </shape>
+    <shape name="male right" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="240"></point>
+        <point x="60" y="210"></point>
+        <point x="45" y="240"></point>
+      </polygon>
+      <circle x="244" y="78" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="202" y="71" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="260" y="100"></point>
+        <point x="255" y="135"></point>
+        <point x="270" y="180"></point>
+        <point x="225" y="240"></point>
+        <point x="15" y="240"></point>
+        <point x="60" y="210"></point>
+        <point x="105" y="210"></point>
+        <point x="150" y="195"></point>
+        <point x="180" y="180"></point>
+        <point x="210" y="150"></point>
+        <point x="221" y="91"></point>
+        <point x="225" y="135"></point>
+        <point x="240" y="135"></point>
+      </polygon>
+      <circle x="251" y="86" marked="false" color="-1" diameter="24" filled="true"></circle>
+      <circle x="209" y="79" marked="false" color="-1" diameter="24" filled="true"></circle>
+      <circle x="216" y="85" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="149" y="189"></point>
+        <point x="179" y="174"></point>
+        <point x="193" y="158"></point>
+        <point x="195" y="75"></point>
+        <point x="150" y="30"></point>
+        <point x="90" y="15"></point>
+        <point x="30" y="60"></point>
+        <point x="15" y="150"></point>
+        <point x="58" y="204"></point>
+        <point x="105" y="203"></point>
+        <point x="142" y="191"></point>
+        <point x="155" y="150"></point>
+        <point x="130" y="115"></point>
+        <point x="87" y="114"></point>
+        <point x="72" y="135"></point>
+        <point x="72" y="165"></point>
+        <point x="111" y="165"></point>
+        <point x="112" y="146"></point>
+        <point x="119" y="146"></point>
+        <point x="118" y="172"></point>
+        <point x="66" y="172"></point>
+        <point x="64" y="134"></point>
+        <point x="81" y="106"></point>
+        <point x="105" y="105"></point>
+        <point x="133" y="106"></point>
+        <point x="153" y="134"></point>
+        <point x="165" y="150"></point>
+      </polygon>
+      <circle x="258" y="92" marked="false" color="255" diameter="12" filled="true"></circle>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <hubNetClient>
+    <view x="238" wrappingAllowedX="true" y="104" frameRate="30.0" minPycor="0" height="431" showTickCounter="true" patchSize="1.6833333333333333" fontSize="13" wrappingAllowedY="true" width="428" tickCounterLabel="ticks" maxPycor="299" updateMode="1" maxPxcor="299" minPxcor="0"></view>
+    <button x="91" actionKey="I" y="87" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="Up" width="62" sizeVersion="0"></button>
+    <button x="91" actionKey="K" y="153" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="Down" width="62" sizeVersion="0"></button>
+    <button x="153" actionKey="L" y="120" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="Right" width="62" sizeVersion="0"></button>
+    <button x="29" actionKey="J" y="120" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="Left" width="62" sizeVersion="0"></button>
+    <monitor x="146" precision="3" y="12" height="49" fontSize="11" display="LOCATED AT:" width="97" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="12" height="49" fontSize="11" display="YOU ARE GROUP:" width="119" sizeVersion="0"></monitor>
+    <monitor x="361" precision="3" y="12" height="49" fontSize="11" display="ADJACENT GROUP:" width="142" sizeVersion="0"></monitor>
+    <button x="522" actionKey="R" y="13" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="reproduce now" width="127" sizeVersion="0"></button>
+    <monitor x="253" precision="3" y="12" height="49" fontSize="11" display="GENERATION:" width="97" sizeVersion="0"></monitor>
+    <monitor x="124" precision="5" y="198" height="49" fontSize="11" display="asexual %" width="101" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="252" height="49" fontSize="11" display="sexual %" width="101" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="306" height="49" fontSize="11" display="allele one %" width="101" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="306" height="49" fontSize="11" display="allele one count" width="100" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="361" height="49" fontSize="11" display="allele two %" width="101" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="361" height="49" fontSize="11" display="allele two count" width="100" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="415" height="49" fontSize="11" display="allele three %" width="102" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="415" height="49" fontSize="11" display="allele three count" width="100" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="469" height="49" fontSize="11" display="allele four %" width="102" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="469" height="49" fontSize="11" display="allele four count" width="100" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="198" height="49" fontSize="11" display="asexual count" width="100" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="252" height="49" fontSize="11" display="sexual count" width="100" sizeVersion="0"></monitor>
+    <note x="19" y="67" backgroundDark="0" fontSize="11" width="642" markdown="false" height="18" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">----------------------------------------------------------------------------------------------------------</note>
+    <note x="48" y="515" backgroundDark="0" fontSize="11" width="150" markdown="false" height="18" textColorDark="-1" textColorLight="-16777216" backgroundLight="0"></note>
+  </hubNetClient>
+  <previewCommands>setup repeat 75 [ go ]</previewCommands>
+  <experiments>
+    <experiment name="experiment" repetitions="2" sequentialRunOrder="true" runMetricsEveryStep="true" timeLimit="1000">
+      <setup>setup</setup>
+      <go>go</go>
+      <postRun>carefully [ collect-data "../results/output.csv" ] [ output-print error-message ]</postRun>
+      <constants>
+        <enumeratedValueSet variable="sexual-to-asexual-ratio">
+          <value value="0.5"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="host-max-pop-density">
+          <value value="0.01"></value>
+          <value value="0.05"></value>
+          <value value="0.1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="host-fertility-rate">
+          <value value="0.001"></value>
+          <value value="0.005"></value>
+          <value value="0.01"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="host-mutation-rate">
+          <value value="0.05"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="sexual-mating-radius">
+          <value value="15"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mortality-rate">
+          <value value="0.001"></value>
+          <value value="0.005"></value>
+          <value value="0.01"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-infection-chance">
+          <value value="0.1"></value>
+          <value value="0.2"></value>
+          <value value="0.3"></value>
+          <value value="0.4"></value>
+          <value value="0.5"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-fertility-rate">
+          <value value="0.05"></value>
+          <value value="0.1"></value>
+          <value value="0.15"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mutation-rate">
+          <value value="0.05"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+  </experiments>
+</model>

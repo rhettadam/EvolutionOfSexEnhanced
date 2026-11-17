@@ -1,0 +1,45 @@
+abstract: "Evolution of Sex is a NetLogo model that illustrates the advantages and\
+  \ disadvantages of sexual and asexual reproductive strategies. It seeks to demonstrate\
+  \ the answer to the question: \u201CWhy do we have sex?\u201D After all, wouldn\u2019\
+  t it be a better strategy to simply clone yourself? There are many advantages to\
+  \ asexual reproduction:\n\n- Your offspring possess all of your own genetic material.\n\
+  - You get to make a copy of 100% of your genes.\n- You don\u2019t have to worry\
+  \ about finding a mate.\n\nConversely, there are many disadvantages to sexual reproduction:\n\
+  \n- You have to share your genetic material with an unrelated individual.\n- You\
+  \ get to make a copy of only 50% of your genes.\n- You have to expend time and energy\
+  \ looking for and obtaining a mate.\n\nFrom this, it may seem like sexual reproduction\
+  \ is an evolutionary puzzle as it appears too costly to ever be advantageous. However,\
+  \ as this model shows, under certain conditions, a sexual reproductive strategy\
+  \ can win out over an asexual strategy. By introducing parasites to the environment,\
+  \ it creates a selective pressure that makes it more advantageous NOT to simply\
+  \ make a clone of yourself! The reason is simple: if a parasite can infect you,\
+  \ it can also infect all of your clones. However, if your offspring only obtain\
+  \ 50% of their genetic material from you, they are less likely to be susceptible\
+  \ to the same parasite that can infect you. Sexual reproducers are able to mix their\
+  \ genetic material in ways that produce new combinations that parasites have not\
+  \ yet evolved to attack. In short, in the arms race between the hosts and the parasites,\
+  \ sexually reproducing hosts are able to keep up much better than asexually reproducing\
+  \ hosts can."
+authors:
+- affiliation: University of Minnesota
+  email: crou0048@umn.edu
+  family-names: Crouse
+  given-names: Kristin
+  orcid: https://orcid.org/0000-0002-4878-7477
+cff-version: 1.2.0
+date-released: '2026-02-18'
+identifiers:
+- type: url
+  value: https://www.comses.net/codebases/5051/releases/1.2.1/
+keywords:
+- evolution
+- parasites
+- red queen hypothesis
+- sex
+license: Apache-2.0
+message: If you use this software, please cite it using the metadata from this file.
+repository-code: https://github.com/kncrouse/EvolutionOfSex
+title: Evolution of Sex
+type: software
+url: https://www.comses.net/codebases/5051/releases/1.2.1/
+version: 1.2.1
