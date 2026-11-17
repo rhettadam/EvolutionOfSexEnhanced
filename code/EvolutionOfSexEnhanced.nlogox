@@ -1,0 +1,2306 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 7.0.4" snapToGrid="true">
+  <code><![CDATA[
+;------------------------------------------------------------------------------------
+;:::::: Evolution of Sex (Enhanced) :::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+; Builds on Kristin Crouse's Evolution of Sex (v1.2.1).
+; Adds self-fertilization, Mendelian segregation, parasite offspring release,
+; salinity / temperature gradients, and spatial observation outputs.
+; With all new modules off (and initial-percent-self-fertilizing = 0),
+; behavior matches the original model.
+;------------------------------------------------------------------------------------
+
+globals [
+  ;; allele domains
+  allele-color-types
+  allele-size-types
+  parasite-size-types
+
+  ;; cached UI toggles
+  last-show-parasites
+
+  ;; parasite population bounds
+  parasite-min-pop
+  parasite-max-pop
+
+  ;; strategy trails (patch shading)
+  trail-radius
+  trail-fade
+
+  ;; setup scaling
+  initial-parasite-fraction
+
+  ;; cached constants
+  patch-count
+
+  ;; observation / output
+  output-interval
+  n-strips
+  boundary-window-ticks
+  samples-in-window
+
+  ;; rolling strip sums (length n-strips), updated every output-interval ticks
+  strip-asexual-sum
+  strip-sexual-sum
+  strip-selfing-sum
+  strip-total-sum
+  strip-sample-count
+
+  ;; latest recorded summaries (for monitors / BehaviorSpace)
+  mean-het-asexual
+  mean-het-sexual
+  mean-het-selfing
+  boundary-position-asexual
+  boundary-width-asexual
+  boundary-position-sexual
+  boundary-width-sexual
+  boundary-position-selfing
+  boundary-width-selfing
+]
+
+breed [ snails snail ]
+breed [ parasites parasite ]
+
+snails-own [
+  allele-color-1
+  allele-color-2
+  allele-size-1
+  allele-size-2
+  sex
+  infecting-parasite
+]
+
+parasites-own [
+  my-host
+]
+
+patches-own [
+  asexual-trail
+  sexual-trail
+  self-fertilizing-trail
+]
+
+;------------------------------------------------------------------------------------
+;:::::: Setup :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to setup
+  clear-all
+
+  setup-global-parameters
+  setup-patches
+  setup-snails
+  setup-parasites
+
+  update-parasite-visibility
+  update-world-display
+  reset-ticks
+end
+
+to setup-global-parameters
+  set patch-count count patches
+
+  set last-show-parasites show-parasites
+
+  set allele-size-types [ 1 3 ]
+  set allele-color-types [ orange blue ]
+  setup-parasite-size-types
+
+  set parasite-min-pop 10
+  set parasite-max-pop 50000
+
+  set trail-radius 3
+  set trail-fade 0.90
+
+  set initial-parasite-fraction 0.1
+
+  set output-interval 25
+  set n-strips 20
+  set boundary-window-ticks 500
+  set samples-in-window max (list 1 (floor (boundary-window-ticks / output-interval)))
+
+  reset-observation-state
+end
+
+to reset-observation-state
+  set strip-asexual-sum n-values n-strips [ 0 ]
+  set strip-sexual-sum n-values n-strips [ 0 ]
+  set strip-selfing-sum n-values n-strips [ 0 ]
+  set strip-total-sum n-values n-strips [ 0 ]
+  set strip-sample-count 0
+
+  set mean-het-asexual 0
+  set mean-het-sexual 0
+  set mean-het-selfing 0
+  set boundary-position-asexual -1
+  set boundary-width-asexual -1
+  set boundary-position-sexual -1
+  set boundary-width-sexual -1
+  set boundary-position-selfing -1
+  set boundary-width-selfing -1
+end
+
+to setup-parasite-size-types
+  set parasite-size-types []
+  foreach allele-size-types [ i ->
+    foreach allele-size-types [ j ->
+      set parasite-size-types lput ((i + j) / 2) parasite-size-types
+    ]
+  ]
+  set parasite-size-types remove-duplicates parasite-size-types
+end
+
+to setup-patches
+  ask patches [
+    set pcolor white
+    set asexual-trail 0
+    set sexual-trail 0
+    set self-fertilizing-trail 0
+  ]
+end
+
+to setup-snails
+  let n-total round snail-carrying-capacity
+  let n-sexual round (n-total * (initial-percent-sexual / 100))
+  let n-selfing round (n-total * (initial-percent-self-fertilizing / 100))
+  if (n-sexual + n-selfing) > n-total [
+    set n-selfing max (list 0 (n-total - n-sexual))
+  ]
+  let n-asexual (n-total - n-sexual - n-selfing)
+
+  create-snails n-total [
+    set hidden? false
+    set label ""
+    set infecting-parasite nobody
+    setxy random-xcor random-ycor
+
+    ifelse who < n-sexual
+    [ set sex coin-flip-sex ]
+    [
+      ifelse who < (n-sexual + n-selfing)
+      [ set sex "self-fertile" ]
+      [ set sex "asexual" ]
+    ]
+
+    set allele-color-1 initialize-color-allele
+    set allele-color-2 initialize-color-allele
+    set allele-size-1 initialize-size-allele
+    set allele-size-2 initialize-size-allele
+
+    set-size-shape-color
+  ]
+end
+
+to setup-parasites
+  if infection-possible? [
+    create-parasites (initial-parasite-fraction * snail-carrying-capacity) [
+      initialize-parasite
+    ]
+  ]
+end
+
+to initialize-parasite
+  set label ""
+  set hidden? (not show-parasites)
+  set shape "circle"
+  setxy random-xcor random-ycor
+  set color ((one-of allele-color-types) - 2)
+  set size (one-of parasite-size-types) / 3
+  set my-host nobody
+end
+
+to-report coin-flip-sex
+  ifelse random-float 1.0 < 0.5 [ report "male" ] [ report "female" ]
+end
+
+to-report initialize-color-allele
+  report one-of allele-color-types
+end
+
+to-report initialize-size-allele
+  report one-of allele-size-types
+end
+
+to set-size-shape-color
+  set size (allele-size-1 + allele-size-2) / 2
+  set shape get-snail-shape
+
+  let idx1 position allele-color-1 allele-color-types
+  let idx2 position allele-color-2 allele-color-types
+  ifelse idx1 >= idx2
+  [ set color allele-color-1 ]
+  [ set color allele-color-2 ]
+end
+
+to-report get-snail-shape
+  if sex = "asexual" [
+    ifelse heading < 180 [ report "asexual right" ] [ report "asexual left" ]
+  ]
+  if sex = "self-fertile" [
+    ifelse heading < 180 [ report "self-fertile right" ] [ report "self-fertile left" ]
+  ]
+  if sex = "male" [
+    ifelse heading < 180 [ report "male right" ] [ report "male left" ]
+  ]
+  if sex = "female" [
+    ifelse heading < 180 [ report "female right" ] [ report "female left" ]
+  ]
+  report "circle"
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Environment helpers :::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to-report infection-possible?
+  ifelse use-salinity-gradient?
+  [ report (infection-chance-west > 0) or (infection-chance-east > 0) ]
+  [ report parasite-infection-chance > 0 ]
+end
+
+;; S(x) = min(1, max(0, 0.5 + (x - xc) / (w * world-width)))
+to-report patch-salinity [px]
+  let world-w world-width
+  let xc (gradient-center / 100) * world-w
+  let width-frac max (list 0.01 gradient-width)
+  report min (list 1 max (list 0 (0.5 + (px - xc) / (width-frac * world-w))))
+end
+
+;; I(x) = Iw + (Ie - Iw) * S(x)
+to-report local-infection-chance
+  ifelse use-salinity-gradient?
+  [
+    let S patch-salinity pxcor
+    report infection-chance-west + (infection-chance-east - infection-chance-west) * S
+  ]
+  [ report parasite-infection-chance ]
+end
+
+;; T(y) linear from 0 (south) to 1 (north)
+to-report patch-temperature [py]
+  let span (max-pycor - min-pycor)
+  if span <= 0 [ report 0.5 ]
+  report (py - min-pycor) / span
+end
+
+;; r(y) = r0 * (1 - c * (1 - T(y)))
+to-report local-mate-radius [base-radius]
+  ifelse use-temperature-gradient?
+  [
+    let T patch-temperature pycor
+    report base-radius * (1 - cold-mating-penalty * (1 - T))
+  ]
+  [ report base-radius ]
+end
+
+;; Move forward, but when a gradient is on, bounce at that axis edge
+;; instead of wrapping so the extremes are never adjacent.
+to move-with-gradient-edges [dist]
+  let new-x (xcor + dist * dx)
+  let new-y (ycor + dist * dy)
+  if use-salinity-gradient? [
+    if new-x < min-pxcor [ set new-x min-pxcor set heading (- heading) ]
+    if new-x > max-pxcor [ set new-x max-pxcor set heading (- heading) ]
+  ]
+  if use-temperature-gradient? [
+    if new-y < min-pycor [ set new-y min-pycor set heading (180 - heading) ]
+    if new-y > max-pycor [ set new-y max-pycor set heading (180 - heading) ]
+  ]
+  setxy new-x new-y
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Go ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to go
+  if ticks = stop-simulation-at [ stop ]
+
+  ;; mating radius (% world width -> patches)
+  let mate-radius ((sexual-mating-radius / 100) * world-width)
+
+  ;; Beverton–Holt density dependence: fertility declines with density but never hits zero
+  let snailN count snails
+  let snailK snail-carrying-capacity
+
+  let density-factor 0
+  ifelse snailK > 0
+  [ set density-factor (snailN / snailK) ]
+  [ set density-factor 0 ]
+
+  let effective-snail-fertility (snail-fertility-rate / (1 + density-factor))
+
+  ;; snails step
+  ask snails [
+    snails-wander
+    snail-reproduce-logistic effective-snail-fertility mate-radius
+    set shape get-snail-shape
+  ]
+
+  ;; hard cap at carrying capacity (removes excess snails, if any)
+  let afterN count snails
+  if (snailK > 0 and afterN > snailK) [
+    ask n-of (afterN - snailK) snails [ remove-snail ]
+  ]
+
+  ;; parasites step (only if infection is enabled)
+  if infection-possible? [
+    parasites-go
+    enforce-parasite-bounds
+  ]
+
+  update-parasite-visibility
+  update-world-display
+
+  if (ticks > 0) and (ticks mod output-interval = 0) [
+    record-output
+  ]
+
+  tick
+end
+
+to-report compute-encounter-prob [mate-radius male-count]
+  if male-count = 0 [ report 0 ]
+
+  ;; male density (males per patch)
+  let male-density (male-count / patch-count)
+
+  ;; expected males within radius
+  let area (pi * mate-radius * mate-radius)
+  let lambda (male-density * area)
+
+  ;; Poisson: P(>=1) = 1 - exp(-lambda)
+  report (1 - exp (0 - lambda))
+end
+
+to update-parasite-visibility
+  if show-parasites != last-show-parasites [
+    ask parasites [ set hidden? (not show-parasites) ]
+    set last-show-parasites show-parasites
+  ]
+end
+
+to update-world-display
+  ;; "none" leaves the white setup background; do not repaint 90k patches every tick
+  if patch-display = "none" [ stop ]
+  if patch-display = "strategies" [
+    update-snail-trails
+    stop
+  ]
+  if patch-display = "salinity" [
+    ask patches [ set pcolor scale-color sky (patch-salinity pxcor) 0 1 ]
+    stop
+  ]
+  if patch-display = "infection" [
+    ;; paints the infection field under current settings
+    ask patches [
+      let I ifelse-value use-salinity-gradient?
+        [ infection-chance-west + (infection-chance-east - infection-chance-west) * (patch-salinity pxcor) ]
+        [ parasite-infection-chance ]
+      set pcolor scale-color red (I / 100) 0 1
+    ]
+    stop
+  ]
+  if patch-display = "temperature" [
+    ask patches [ set pcolor scale-color orange (patch-temperature pycor) 0 1 ]
+    stop
+  ]
+  if patch-display = "mate-radius" [
+    ;; relative female search: 1 warm, (1 - cold-mating-penalty) cold
+    ask patches [
+      let factor 1
+      if use-temperature-gradient? [
+        set factor (1 - cold-mating-penalty * (1 - patch-temperature pycor))
+      ]
+      set pcolor scale-color lime factor 0 1
+    ]
+    stop
+  ]
+  ask patches [ set pcolor white ]
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Strategy trails ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to update-snail-trails
+  ;; fade
+  ask patches [
+    set asexual-trail (asexual-trail * trail-fade)
+    set sexual-trail  (sexual-trail  * trail-fade)
+    set self-fertilizing-trail (self-fertilizing-trail * trail-fade)
+
+    if asexual-trail < 0.01 [ set asexual-trail 0 ]
+    if sexual-trail  < 0.01 [ set sexual-trail  0 ]
+    if self-fertilizing-trail < 0.01 [ set self-fertilizing-trail 0 ]
+  ]
+
+  ;; deposit
+  ask snails [
+    if sex = "asexual" [
+      ask patches in-radius trail-radius [ set asexual-trail 1 ]
+    ]
+    if sex = "self-fertile" [
+      ask patches in-radius trail-radius [ set self-fertilizing-trail 1 ]
+    ]
+    if sex = "male" or sex = "female" [
+      ask patches in-radius trail-radius [ set sexual-trail 1 ]
+    ]
+  ]
+
+  ;; distinct colors so strategies are readable on the view
+  ask patches [
+    ifelse sexual-trail > 0
+    [ set pcolor violet ]
+    [
+      ifelse self-fertilizing-trail > 0
+      [ set pcolor lime ]
+      [
+        ifelse asexual-trail > 0
+        [ set pcolor yellow ]
+        [ set pcolor white ]
+      ]
+    ]
+  ]
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Snails ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to snails-wander
+  right random 90
+  left random 90
+  move-with-gradient-edges 0.3
+  if infecting-parasite != nobody [
+    ask infecting-parasite [ move-to myself ]
+  ]
+end
+
+to snail-reproduce-logistic [effective-snail-fertility mate-radius]
+  if infecting-parasite != nobody [ stop ]
+
+  if sex = "asexual" [
+    if random-float 1.0 < effective-snail-fertility [
+      snails-reproduce-asexually
+    ]
+  ]
+
+  if sex = "female" [
+    if random-float 1.0 < effective-snail-fertility [
+      snails-reproduce-sexually (local-mate-radius mate-radius)
+    ]
+  ]
+
+  if sex = "self-fertile" [
+    let selfing-fertility (effective-snail-fertility * (1 - self-fertilizing-cost))
+    if random-float 1.0 < selfing-fertility [
+      snails-reproduce-selfing
+    ]
+  ]
+end
+
+to snails-reproduce-sexually [mate-radius]
+  let local-males snails in-radius mate-radius with [ sex = "male" ]
+  if any? local-males [
+    let mate one-of local-males
+    let mom-c1 allele-color-1
+    let mom-c2 allele-color-2
+    let mom-s1 allele-size-1
+    let mom-s2 allele-size-2
+    let dad-c1 [allele-color-1] of mate
+    let dad-c2 [allele-color-2] of mate
+    let dad-s1 [allele-size-1] of mate
+    let dad-s2 [allele-size-2] of mate
+
+    hatch-snails 1 [
+      ifelse mendelian-segregation?
+      [
+        set allele-color-1 one-of (list mom-c1 mom-c2)
+        set allele-color-2 one-of (list dad-c1 dad-c2)
+        set allele-size-1  one-of (list mom-s1 mom-s2)
+        set allele-size-2  one-of (list dad-s1 dad-s2)
+      ]
+      [
+        ;; original slot-wise inheritance
+        set allele-color-1 one-of (list mom-c1 dad-c1)
+        set allele-color-2 one-of (list mom-c2 dad-c2)
+        set allele-size-1  one-of (list mom-s1 dad-s1)
+        set allele-size-2  one-of (list mom-s2 dad-s2)
+      ]
+
+      set sex coin-flip-sex
+      snails-update-for-mutation
+      set-size-shape-color
+    ]
+  ]
+end
+
+to snails-reproduce-asexually
+  hatch-snails 1 [
+    snails-update-for-mutation
+    set-size-shape-color
+  ]
+end
+
+;; Self-fertile snails hatch from two of their own gametes.
+;; Without mendelian-segregation?, this is an exact clone (original slot logic on one parent).
+;; With mendelian-segregation?, each locus draws two independent alleles from the parent (1:2:1).
+to snails-reproduce-selfing
+  let p-c1 allele-color-1
+  let p-c2 allele-color-2
+  let p-s1 allele-size-1
+  let p-s2 allele-size-2
+
+  hatch-snails 1 [
+    ifelse mendelian-segregation?
+    [
+      set allele-color-1 one-of (list p-c1 p-c2)
+      set allele-color-2 one-of (list p-c1 p-c2)
+      set allele-size-1  one-of (list p-s1 p-s2)
+      set allele-size-2  one-of (list p-s1 p-s2)
+    ]
+    [
+      ;; hatch already copied parent alleles (exact clone before mutation)
+    ]
+
+    set sex "self-fertile"
+    snails-update-for-mutation
+    set-size-shape-color
+  ]
+end
+
+to snails-update-for-mutation
+  if random-float 1.0 < snail-mutation-rate [ set allele-color-1 initialize-color-allele ]
+  if random-float 1.0 < snail-mutation-rate [ set allele-color-2 initialize-color-allele ]
+  if random-float 1.0 < snail-mutation-rate [ set allele-size-1 initialize-size-allele ]
+  if random-float 1.0 < snail-mutation-rate [ set allele-size-2 initialize-size-allele ]
+end
+
+to remove-snail
+  if infecting-parasite != nobody [ ask infecting-parasite [ die ] ]
+  die
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Parasites :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to parasites-go
+  let snailN count snails
+  let parasiteN count parasites
+
+  ;; compute crowding + effective fertility once per tick
+  let effective-parasite-fertility parasite-fertility-rate
+  if (snailN > 0 and per-snail-parasite-capacity > 0) [
+    let pps (parasiteN / snailN)
+    set effective-parasite-fertility (parasite-fertility-rate / (1 + (pps / per-snail-parasite-capacity)))
+  ]
+
+  ask parasites [
+    parasite-wander
+    parasites-reproduce effective-parasite-fertility
+    parasite-death
+  ]
+end
+
+to enforce-parasite-bounds
+  let current count parasites
+
+  if current > parasite-max-pop [
+    ask n-of (current - parasite-max-pop) parasites [ die ]
+  ]
+
+  if current < parasite-min-pop [
+    create-parasites (parasite-min-pop - current) [
+      initialize-parasite
+    ]
+  ]
+end
+
+to parasite-wander
+  if my-host != nobody [ stop ]
+  right random 30
+  left random 30
+  move-with-gradient-edges 0.7
+  attempt-infection
+end
+
+to parasites-reproduce [effective-parasite-fertility]
+  if my-host = nobody [ stop ]
+
+  if random-float 1.0 < effective-parasite-fertility [
+    hatch-parasites 1 [
+      ifelse release-offspring?
+      [
+        ;; every offspring is free; mutation independently reshuffles strategy
+        set my-host nobody
+        if random-float 1.0 < parasite-mutation-rate [
+          set color ((one-of allele-color-types) - 2)
+          set size (one-of parasite-size-types) / 3
+        ]
+      ]
+      [
+        ;; original: stay on parent host unless mutation also releases
+        if random-float 1.0 < parasite-mutation-rate [
+          set color ((one-of allele-color-types) - 2)
+          set size (one-of parasite-size-types) / 3
+          set my-host nobody
+        ]
+      ]
+    ]
+  ]
+end
+
+to attempt-infection
+  let local-snails snails-here with [ infecting-parasite = nobody ]
+  if any? local-snails [
+    let target one-of local-snails
+    let matching? ( [color] of target = (color + 2) ) and ( [size] of target = (size * 3) )
+    if matching? [
+      if random-float 100 < local-infection-chance [
+        ask target [ set infecting-parasite myself ]
+        set my-host target
+      ]
+    ]
+  ]
+end
+
+to parasite-death
+  if random-float 1.0 < parasite-mortality-rate [
+    if my-host != nobody [ ask my-host [ remove-snail ] ]
+    die
+  ]
+end
+
+to-report count-free-parasites
+  report count parasites with [ my-host = nobody ]
+end
+
+to-report count-hosted-parasites
+  report count parasites with [ my-host != nobody ]
+end
+
+;------------------------------------------------------------------------------------
+;:::::: Observation / reporters :::::::::::::::::::::::::::::::::::::::::::::::::::::
+;------------------------------------------------------------------------------------
+
+to-report snail-heterozygosity
+  let color-het ifelse-value (allele-color-1 != allele-color-2) [ 1 ] [ 0 ]
+  let size-het  ifelse-value (allele-size-1  != allele-size-2)  [ 1 ] [ 0 ]
+  report (color-het + size-het) / 2
+end
+
+to-report mean-heterozygosity [agentset]
+  ifelse any? agentset
+  [ report mean [ snail-heterozygosity ] of agentset ]
+  [ report 0 ]
+end
+
+to-report count-sexual
+  report count snails with [ sex = "male" or sex = "female" ]
+end
+
+to-report count-asexual
+  report count snails with [ sex = "asexual" ]
+end
+
+to-report count-selfing
+  report count snails with [ sex = "self-fertile" ]
+end
+
+to-report pct-sexual
+  ifelse any? snails
+  [ report precision (100 * count-sexual / count snails) 2 ]
+  [ report 0 ]
+end
+
+to-report pct-asexual
+  ifelse any? snails
+  [ report precision (100 * count-asexual / count snails) 2 ]
+  [ report 0 ]
+end
+
+to-report pct-selfing
+  ifelse any? snails
+  [ report precision (100 * count-selfing / count snails) 2 ]
+  [ report 0 ]
+end
+
+to-report strip-index-of [px]
+  let W world-width
+  let idx floor ((px - min-pxcor) / (W / n-strips))
+  report min (list (n-strips - 1) max (list 0 idx))
+end
+
+to record-output
+  set mean-het-asexual mean-heterozygosity (snails with [ sex = "asexual" ])
+  set mean-het-sexual  mean-heterozygosity (snails with [ sex = "male" or sex = "female" ])
+  set mean-het-selfing mean-heterozygosity (snails with [ sex = "self-fertile" ])
+
+  ;; strategy counts in n-strips vertical strips
+  let asex-counts n-values n-strips [ 0 ]
+  let sex-counts  n-values n-strips [ 0 ]
+  let self-counts n-values n-strips [ 0 ]
+  let tot-counts  n-values n-strips [ 0 ]
+
+  ask snails [
+    let i strip-index-of pxcor
+    set tot-counts replace-item i tot-counts ((item i tot-counts) + 1)
+    if sex = "asexual" [
+      set asex-counts replace-item i asex-counts ((item i asex-counts) + 1)
+    ]
+    if sex = "male" or sex = "female" [
+      set sex-counts replace-item i sex-counts ((item i sex-counts) + 1)
+    ]
+    if sex = "self-fertile" [
+      set self-counts replace-item i self-counts ((item i self-counts) + 1)
+    ]
+  ]
+
+  ;; rolling window of last ~500 ticks
+  set strip-asexual-sum (map + strip-asexual-sum asex-counts)
+  set strip-sexual-sum  (map + strip-sexual-sum sex-counts)
+  set strip-selfing-sum (map + strip-selfing-sum self-counts)
+  set strip-total-sum   (map + strip-total-sum tot-counts)
+  set strip-sample-count (strip-sample-count + 1)
+
+  if strip-sample-count > samples-in-window [
+    ;; drop one average sample-worth by scaling (approximate FIFO via proportional decay)
+    let keep ((samples-in-window - 1) / samples-in-window)
+    set strip-asexual-sum map [ v -> v * keep ] strip-asexual-sum
+    set strip-sexual-sum  map [ v -> v * keep ] strip-sexual-sum
+    set strip-selfing-sum map [ v -> v * keep ] strip-selfing-sum
+    set strip-total-sum   map [ v -> v * keep ] strip-total-sum
+    set strip-sample-count samples-in-window
+  ]
+
+  update-boundary-metrics
+end
+
+to update-boundary-metrics
+  let asex-shares strip-shares strip-asexual-sum
+  let sex-shares  strip-shares strip-sexual-sum
+  let self-shares strip-shares strip-selfing-sum
+
+  set boundary-position-asexual crossing-position asex-shares 0.50
+  set boundary-width-asexual    boundary-width-of asex-shares
+  set boundary-position-sexual  crossing-position sex-shares 0.50
+  set boundary-width-sexual     boundary-width-of sex-shares
+  set boundary-position-selfing crossing-position self-shares 0.50
+  set boundary-width-selfing    boundary-width-of self-shares
+end
+
+to-report strip-shares [count-list]
+  report (map [ [c t] -> ifelse-value (t > 0) [ c / t ] [ 0 ] ] count-list strip-total-sum)
+end
+
+;; Position (0..1 along x) where strategy share crosses threshold, or -1 if none.
+to-report crossing-position [shares threshold]
+  let i 0
+  while [ i < (n-strips - 1) ] [
+    let a item i shares
+    let b item (i + 1) shares
+    if (a - threshold) * (b - threshold) <= 0 and (a != b) [
+      let frac (threshold - a) / (b - a)
+      let pos ((i + frac + 0.5) / n-strips)
+      report pos
+    ]
+    set i (i + 1)
+  ]
+  report -1
+end
+
+to-report boundary-width-of [shares]
+  let p25 crossing-position shares 0.25
+  let p75 crossing-position shares 0.75
+  ifelse (p25 < 0) or (p75 < 0)
+  [ report -1 ]
+  [ report abs (p75 - p25) ]
+end
+
+;; Strip share reporters for BehaviorSpace (current instantaneous, not rolling)
+to-report strip-strategy-share [strategy-name strip-i]
+  let W world-width
+  let left-x  (min-pxcor + strip-i * (W / n-strips))
+  let right-x (min-pxcor + (strip-i + 1) * (W / n-strips))
+  let in-strip snails with [ pxcor >= left-x and pxcor < right-x ]
+  if strip-i = (n-strips - 1) [
+    set in-strip snails with [ pxcor >= left-x and pxcor <= max-pxcor ]
+  ]
+  if not any? in-strip [ report 0 ]
+  if strategy-name = "asexual" [
+    report (count in-strip with [ sex = "asexual" ]) / (count in-strip)
+  ]
+  if strategy-name = "sexual" [
+    report (count in-strip with [ sex = "male" or sex = "female" ]) / (count in-strip)
+  ]
+  if strategy-name = "selfing" [
+    report (count in-strip with [ sex = "self-fertile" ]) / (count in-strip)
+  ]
+  report 0
+end
+]]></code>
+  <widgets>
+    <view x="285" wrappingAllowedX="true" y="200" frameRate="30.0" minPycor="0" height="509" showTickCounter="true" patchSize="1.6833333333333333" fontSize="10" wrappingAllowedY="true" width="509" tickCounterLabel="timesteps" maxPycor="299" updateMode="1" maxPxcor="299" minPxcor="0"></view>
+    <plot x="815" autoPlotX="true" yMax="100.0" autoPlotY="false" yAxis="percent of individuals" y="17" xMin="0.0" height="315" legend="true" xMax="10.0" yMin="0.0" width="319" xAxis="timesteps" display="Reproductive Strategies">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="asexual" color="-4539718" legend="true">
+        <setup></setup>
+        <update>if (any? snails) [ plot ( 100 * (count snails with [ sex = "asexual" ]) / count snails ) ]</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="sexual" color="-11053225" legend="true">
+        <setup></setup>
+        <update>if (any? snails) [ plot ( 100 * (count snails with [ sex = "male" or sex = "female" ]) / count snails ) ]</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="self-fertile" color="-6974059" legend="true">
+        <setup></setup>
+        <update>if (any? snails) [ plot ( 100 * (count snails with [ sex = "self-fertile" ]) / count snails ) ]</update>
+      </pen>
+    </plot>
+    <plot x="1145" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="number of individuals" y="15" xMin="0.0" height="315" legend="true" xMax="10.0" yMin="0.0" width="326" xAxis="timesteps" display="Parasite Phenotypes">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="blue-small" color="-8020277" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = blue - 2) and (size = 1 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-medium" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = blue - 2) and (size = 2 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-large" color="-14730904" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = blue - 2) and (size = 3 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-small" color="-612749" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = orange - 2) and (size = 1 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-medium" color="-955883" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = orange - 2) and (size = 2 / 3)])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-large" color="-6995700" legend="true">
+        <setup></setup>
+        <update>plot (count parasites with [ (color = orange - 2) and (size = 3 / 3)])</update>
+      </pen>
+    </plot>
+    <slider x="285" step="1000" y="20" max="10000" width="510" display="stop-simulation-at" height="50" min="0" direction="Horizontal" default="5000.0" variable="stop-simulation-at" units="timesteps"></slider>
+    <switch x="285" y="80" height="40" on="false" variable="show-parasites" width="250" display="show-parasites"></switch>
+    <chooser x="545" y="75" height="55" variable="patch-display" current="0" width="250" display="patch-display">
+      <choice type="string" value="none"></choice>
+      <choice type="string" value="strategies"></choice>
+      <choice type="string" value="salinity"></choice>
+      <choice type="string" value="infection"></choice>
+      <choice type="string" value="temperature"></choice>
+      <choice type="string" value="mate-radius"></choice>
+    </chooser>
+    <monitor x="285" precision="17" y="135" height="55" fontSize="11" width="120" display="# parasites">count parasites</monitor>
+    <monitor x="415" precision="17" y="135" height="55" fontSize="11" width="120" display="# sexual">count-sexual</monitor>
+    <monitor x="545" precision="17" y="135" height="55" fontSize="11" width="120" display="# asexual">count-asexual</monitor>
+    <monitor x="675" precision="17" y="135" height="55" fontSize="11" width="120" display="# selfing">count-selfing</monitor>
+    <plot x="815" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="number of individuals" y="345" xMin="0.0" height="325" legend="true" xMax="10.0" yMin="0.0" width="319" xAxis="timesteps" display="Asexual Phenotypes">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="blue-small" color="-8020277" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 1) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-medium" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 2) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-large" color="-14730904" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 3) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-small" color="-612749" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and (size = 1) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-medium" color="-955883" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and (size = 2) and (sex = "asexual")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-large" color="-6995700" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and ( size = 3 ) and (sex = "asexual")])</update>
+      </pen>
+    </plot>
+    <plot x="1145" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="number of individuals" y="345" xMin="0.0" height="325" legend="true" xMax="10.0" yMin="0.0" width="326" xAxis="timesteps" display="Sexual Phenotypes">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="blue-small" color="-8020277" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 1) and (sex = "male" or sex = "female")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-medium" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 2) and (sex = "male" or sex = "female")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="blue-large" color="-14730904" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = blue ) and (size = 3) and (sex = "male" or sex = "female")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-small" color="-612749" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and (size = 1) and (sex = "male" or sex = "female")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-medium" color="-955883" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange) and (size = 2) and (sex = "male" or sex = "female")])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="orange-large" color="-6995700" legend="true">
+        <setup></setup>
+        <update>plot (count snails with [ (color = orange ) and (size = 3) and (sex = "male" or sex = "female")])</update>
+      </pen>
+    </plot>
+    <plot x="1475" autoPlotX="true" yMax="1.0" autoPlotY="false" yAxis="mean heterozygosity" y="15" xMin="0.0" height="200" legend="true" xMax="10.0" yMin="0.0" width="280" xAxis="timesteps" display="Heterozygosity">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="sexual" color="-11053225" legend="true">
+        <setup></setup>
+        <update>plot mean-heterozygosity (snails with [ sex = "male" or sex = "female" ])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="selfing" color="-6974059" legend="true">
+        <setup></setup>
+        <update>plot mean-heterozygosity (snails with [ sex = "self-fertile" ])</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="asexual" color="-4539718" legend="true">
+        <setup></setup>
+        <update>plot mean-heterozygosity (snails with [ sex = "asexual" ])</update>
+      </pen>
+    </plot>
+    <button x="60" y="20" height="50" disableUntilTicks="false" forever="false" kind="Observer" width="80" sizeVersion="0">setup</button>
+    <button x="150" y="20" height="50" disableUntilTicks="false" forever="true" kind="Observer" width="80" sizeVersion="0">go</button>
+    <note x="20" y="85" backgroundDark="0" fontSize="11" width="247" markdown="false" height="26" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">--------------------------- Hosts ---------------------------</note>
+    <slider x="15" step="1" y="115" max="100" width="250" display="initial-percent-sexual" height="50" min="0" direction="Horizontal" default="50.0" variable="initial-percent-sexual" units="%"></slider>
+    <slider x="15" step="1" y="170" max="100" width="250" display="initial-percent-self-fertilizing" height="50" min="0" direction="Horizontal" default="0.0" variable="initial-percent-self-fertilizing" units="%"></slider>
+    <slider x="15" step="100" y="225" max="10000" width="250" display="snail-carrying-capacity" height="50" min="0" direction="Horizontal" default="5000.0" variable="snail-carrying-capacity"></slider>
+    <slider x="15" step="0.001" y="280" max="0.1" width="250" display="snail-fertility-rate" height="50" min="0.001" direction="Horizontal" default="0.01" variable="snail-fertility-rate"></slider>
+    <slider x="15" step=".0001" y="335" max="0.01" width="250" display="snail-mutation-rate" height="50" min="0" direction="Horizontal" default="0.001" variable="snail-mutation-rate"></slider>
+    <slider x="15" step="1" y="390" max="100" width="250" display="sexual-mating-radius" height="50" min="0" direction="Horizontal" default="50.0" variable="sexual-mating-radius" units="% world"></slider>
+    <slider x="15" step="0.01" y="445" max="1" width="250" display="self-fertilizing-cost" height="50" min="0" direction="Horizontal" default="0.0" variable="self-fertilizing-cost"></slider>
+    <note x="20" y="505" backgroundDark="0" fontSize="11" width="250" markdown="false" height="25" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">------------------------- Parasites ------------------------</note>
+    <slider x="15" step="1" y="535" max="100" width="250" display="parasite-infection-chance" height="50" min="0" direction="Horizontal" default="70.0" variable="parasite-infection-chance" units="%"></slider>
+    <slider x="15" step="1" y="590" max="30" width="250" display="per-snail-parasite-capacity" height="50" min="0" direction="Horizontal" default="5.0" variable="per-snail-parasite-capacity"></slider>
+    <slider x="15" step=".001" y="645" max="1" width="250" display="parasite-fertility-rate" height="50" min="0" direction="Horizontal" default="0.5" variable="parasite-fertility-rate"></slider>
+    <slider x="15" step=".001" y="700" max="1" width="250" display="parasite-mortality-rate" height="50" min="0" direction="Horizontal" default="0.01" variable="parasite-mortality-rate"></slider>
+    <slider x="15" step=".01" y="755" max="1.0" width="250" display="parasite-mutation-rate" height="50" min="0" direction="Horizontal" default="0.1" variable="parasite-mutation-rate"></slider>
+    <note x="285" y="720" backgroundDark="0" fontSize="11" width="500" markdown="false" height="25" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">-------------------- Enhancements (ODD modules) --------------------</note>
+    <switch x="285" y="750" height="40" on="false" variable="mendelian-segregation?" width="240" display="mendelian-segregation?"></switch>
+    <switch x="545" y="750" height="40" on="false" variable="release-offspring?" width="240" display="release-offspring?"></switch>
+    <switch x="285" y="800" height="40" on="false" variable="use-salinity-gradient?" width="240" display="use-salinity-gradient?"></switch>
+    <switch x="545" y="800" height="40" on="false" variable="use-temperature-gradient?" width="240" display="use-temperature-gradient?"></switch>
+    <note x="815" y="678" backgroundDark="0" fontSize="11" width="520" markdown="false" height="20" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">Salinity on: local infection = west→east blend (S=0 west, S=1 east). Off: use parasite-infection-chance.</note>
+    <slider x="815" step="1" y="700" max="100" width="250" display="infection-chance-west" height="50" min="0" direction="Horizontal" default="0.0" variable="infection-chance-west" units="%"></slider>
+    <slider x="1085" step="1" y="700" max="100" width="250" display="infection-chance-east" height="50" min="0" direction="Horizontal" default="70.0" variable="infection-chance-east" units="%"></slider>
+    <slider x="815" step="1" y="755" max="100" width="250" display="gradient-center" height="50" min="0" direction="Horizontal" default="50.0" variable="gradient-center" units="% world"></slider>
+    <slider x="1085" step="0.01" y="755" max="1" width="250" display="gradient-width" height="50" min="0.05" direction="Horizontal" default="0.25" variable="gradient-width"></slider>
+    <note x="815" y="808" backgroundDark="0" fontSize="11" width="520" markdown="false" height="20" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">Temp on: mate radius shrinks toward the cold south by cold-mating-penalty. Off: full sexual-mating-radius everywhere.</note>
+    <slider x="815" step="0.05" y="830" max="1" width="250" display="cold-mating-penalty" height="50" min="0" direction="Horizontal" default="0.75" variable="cold-mating-penalty"></slider>
+    <monitor x="1085" precision="3" y="830" height="45" fontSize="11" width="95" display="het sex">mean-het-sexual</monitor>
+    <monitor x="1185" precision="3" y="830" height="45" fontSize="11" width="95" display="het self">mean-het-selfing</monitor>
+    <monitor x="1285" precision="3" y="830" height="45" fontSize="11" width="95" display="het asex">mean-het-asexual</monitor>
+    <monitor x="1385" precision="3" y="830" height="45" fontSize="11" width="95" display="bnd sex">boundary-position-sexual</monitor>
+  </widgets>
+  <info><![CDATA[# ODD for Enhanced Evolution of Sex Model
+
+Rhett Adam, EES 4760 Individual Research Project
+
+## Purpose and patterns
+
+This ODD describes an enhancement of Kristin Crouse’s Evolution of Sex model (CoMSES,
+version 1.2.1), in which coevolving parasites can keep sexual reproduction alive against asexual competitors. The enhanced model asks which reproductive strategy wins under which local conditions, and how sharply the winners are separated in space. It adds self-fertilization as a third strategy and environmental gradients, so strategies compete locally instead of in one mixed population.
+
+Four questions guide this study. Do self-fertilizers beat outcrossers when parasites cannot evolve and fail when parasites coevolve, as in experimental work on self-fertilizing hosts (Morran et al. 2011)? When parasite pressure varies across space, does a stable boundary form between strategies, and what sets its position and sharpness? Does a second gradient that makes mate finding harder let self-fertilizing take habitat from outcrossing? Does parasite evolution shift the boundary?
+
+With all new modules off, the model must reproduce the behavior of the original. Asexual snails should replace sexual ones without parasites, and sexual reproduction should persist when infection is frequent, and mates are easy to find. I will judge the new modules by whether selffertilization heterozygosity falls quickly, whether parasite strategies track the most common host phenotypes within each region, and whether strategy shares change consistently along a gradient.
+
+## Entities, state variables, and scales
+
+The model has two types of agents, snails and parasites, plus spatial units (patches) and an environment.
+
+**Snails** are diploid. Their state variables are allele-color-1 and allele-color-2 (orange or blue, with blue dominant), allele-size-1 and allele-size-2 (1 or 3, codominant, so size is their mean), sex, infecting-parasite (the parasite infecting the snail, or nobody), position (x and y in patch units), and heading (degrees). Sex sets the reproductive strategy and is male, female, asexual, or self-fertile. It is fixed for life and inherited, except that offspring of sexual parents are male or female with equal probability. Color and size together give six phenotypes.
+
+**Parasites** are haploid. Their state variables are color and size, which define the infection strategy and take one of the same six phenotypes, my-host (the snail it infects, or nobody), position, and heading. A parasite can infect only a snail with the same color and size.
+
+**Patches** have a fixed location (column and row) and three display trails: asexual-trail, sexual-trail, and self-fertilizing-trail. Each is a unitless value from 0 to 1 that marks recent presence of that strategy.
+
+**The environment** consists of two fixed gradients, salinity from 0 in the west to 1 in the east and temperature from 0 in the south to 1 in the north. Salinity, temperature, and the local infection chance and mate radius derived from them are calculated from patch position and the gradient parameters, so they are not state variables.
+
+**Scales.** One patch is one arbitrary distance unit, and one tick is one arbitrary time step. The world is 300 by 300 patches, and runs last 5,000 ticks for baseline checks and 10,000 ticks for gradient runs. Snails move 0.3 patches per tick, and parasites move 0.7 patches per tick. When a gradient is on, the world does not wrap along that axis, and agents turn around at the edge, so the extremes of the gradient are never adjacent.
+
+## Process overview and scheduling
+The model runs in discrete time steps (ticks), with each tick consisting of a sequence of
+environmental, snail, and parasite processes. At the beginning of each tick, local population density is calculated. Snails then move and reproduce in randomized order, after which population size is regulated through density-dependent culling.
+
+When infection is possible, local crowding is recalculated, and parasites undergo their
+movement, infection, reproduction, and mortality processes. Free parasites move independently and attempt to infect nearby snails, while parasites already infecting a host move with that host and reproduce. Parasite population size is then regulated by enforcing population bounds. Finally, strategy-presence trails are updated, and model outputs are recorded at the specified sampling interval.
+
+All agents within a population are activated in randomized order, and changes to the model occur immediately rather than being held until the end of a tick. Consequently, agents acting later in a tick may respond to changes caused by agents that acted earlier. Newly produced offspring enter the population immediately but do not become eligible to act until the following tick.
+
+The scheduling sequence is summarized below:
+
+Environmental and population calculations: Calculate local population density.
+
+Snail processes: Randomized movement, reproduction, and population regulation.
+
+Parasite processes: When infection is possible, calculate crowding, move and infect, reproduce,and regulate parasite mortality and population size.
+
+Observation: Update strategy-presence traits and record model outputs at the sampling interval.
+
+## Design concepts
+
+**Basic principles.** The model rests on the Red Queen hypothesis, in which parasites favor common host genotypes and so reward hosts that reshuffle their genes. It adds two ideas: that mating systems trade the costs of males and mate finding against the benefits of recombination, and that parasite pressure can differ from place to place. The model tests whether these principles still hold when strategies compete locally.
+
+**Emergence.** Strategy frequencies, host and parasite phenotype cycles, extinctions, and the position and sharpness of strategy boundaries emerge from reproduction, infection, and
+movement.
+
+**Adaptation.** Agents have no adaptive behavior. Populations adapt through differential
+survival and reproduction of genotypes and parasite strategies, with mutation and recombination supplying variation.
+
+**Objectives.** Not used.
+
+**Learning.** Not used.
+
+**Prediction.** Not used.
+
+**Sensing.** Females sense males within their local mate radius, and free parasites sense
+uninfected snails on their own patch. Each agent reads the gradient values of its own patch only.
+
+**Interaction.** Mating and infection are direct interactions. Snails compete indirectly through carrying capacity and parasites through crowding, so strategies interact only through these limits and through the parasites.
+
+**Stochasticity.** Movement, reproduction, inheritance, mutation, mate choice, infection,
+parasite death, culling, and all initial conditions are random, which is why results are
+summarized over replicates.
+
+**Collectives.** Not used.
+
+**Observation.** The original plots of strategy share and phenotype counts are kept. New
+outputs record strategy share and heterozygosity through time and strategy share along the
+gradient, as described under record-output.
+
+## Initialization
+At time 0, snail-carrying-capacity snails (5,000 by default) are placed at uniformly random positions with random headings. A fraction initial-percent-sexual of them are sexual, each male or female with equal probability; a fraction initial-percent-self-fertilizing are self-fertilizers, and the rest are asexual. Strategy is assigned independently of position, so every strategy starts spread across the whole world, and any spatial pattern comes from selection. Each color allele is orange or blue, and each size allele is 1 or 3, with equal probability. If any infection chance is
+above 0, 10% of snail-carrying-capacity parasites (500 by default) are placed freely at random positions, each with one of the six strategies with equal probability. All trials start at 0. Initial values are arbitrary and not based on data, and they are the same in every run apart from random draws. Replicates use different random seeds, and the same seed list is reused across treatments.
+
+## Input data
+The model does not use input data to represent time-varying processes. Salinity and temperature are generated by a formula at setup and stay constant during a run.
+
+## Submodels
+
+**Environmental fields.** With x the patch column, W the world width, xc the gradient center, and w the gradient width as a fraction of W, salinity is a ramp.
+
+S(x) = min (1, max (0, 0.5 + (x – xc) / (wW)))
+
+The local infection chance is I(x) = Iw + (Ie - Iw)S(x). Temperature T(y) is linear in the patch row, and a female’s search radius is r(y) = r0(1 – c (1 – T(y))), with r0 the base mating radius and c the cold-mating penalty.
+
+**Reproduction.** An uninfected snail that passes the fertility draw reproduces by strategy. Asexual snails clone. A female picks a random male within her local radius and fails if none is in range. A self-fertile snail hatches one offspring from two of its own gametes, and its fertility is multiplied by one minus self-fertilizing-cost. In the original code, a sexual offspring takes at each locus either its mother’s or its father’s allele from the same slot, which, applied to one parent, returns an exact clone. When mendelian-segregation? is on, each parent instead contributes one gamete carrying a randomly chosen one of its two alleles per locus, so a self-fertilizing heterozygote gives the usual 1 to 2 to 1 genotype ratio. Offspring inherit the parent’s strategy and mutate as in the original.
+
+**Infection.** A free parasite picks an uninfected snail on its patch, and infection needs an exact color and size match and a draw below the local infection chance.
+
+**Parasite release and evolution.** In the original code, a new parasite copies its parent’s host and leaves only if it mutates, so the mutation rate also controls dispersal. With release-offspring? on, every new parasite is free. Parasite evolution is then varied through the mutation rate. At 0, no new strategies appear; at 0.1, parasites coevolve, and at 1.0, strategies are random and cannot track hosts.
+
+**Observation.** Every 25 ticks, the model records counts of each strategy and parasite type, mean heterozygosity by strategy, and strategy counts in 20 vertical strips. After averaging the last 500 ticks, boundary position is where a strategy’s share crosses 50%, and width is the distance between its 25% and 75% crossings.
+
+## Planned experiments
+Experiment 0 checks that the new switches leave the baseline unchanged, with and without
+mendelian-segregation?. E1 starts all three strategies at one-third each in a uniform world, varying infection chance and self-fertilizing cost. E2 varies parasite mutation rate over 0, 0.1, and 1.0 to test whether self-fertilizing wins against a parasite that cannot track it and fails against one that can. E3 turns on the salinity gradient, varying gradient width and mating radius, first with sexual against asexual snails and then with all three strategies. E4 varies the infection range and mutation rate to test whether the boundary tracks the local infection chance at which sex persists in a uniform world. E5, if time allows, adds the temperature gradient and maps which strategy dominates each region. Each condition uses at least 15 replicates, and results report medians and replicate outcome counts.
+
+## References
+Crouse, K. (2026). Evolution of Sex (Version 1.2.1). CoMSES Computational Model Library.
+https://www.comses.net/codebases/5051/releases/1.2.1/
+
+Morran, L. T., Schmidt, O. G., Gelarden, I. A., Parrish, R. C., II, & Lively, C. M. (2011). Running with the Red Queen: Host-parasite coevolution selects for biparental sex. *Science, 333(6039)*, 216–218. https://doi.org/10.1126/science.1206360
+
+## Hybrid defaults and interactive tuning protocol
+
+Interface switches stay **off** so Setup matches the original baseline. New numeric defaults are pre-tuned so flipping a module on shows a clear effect without hunting for values first.
+
+**patch-display chooser** paints the world so every env knob is visible:
+- `none` — white background (baseline look)
+- `strategies` — yellow asexual / violet sexual / lime selfing trails
+- `salinity` — S(x) ramp (scrub `gradient-center` / `gradient-width`)
+- `infection` — infection field (uniform `parasite-infection-chance`, or west→east when salinity is on)
+- `temperature` — T(y) south→north
+- `mate-radius` — relative female search factor under `cold-mating-penalty`
+
+**What “good” looks like (from your baseline analysis + ODD):**
+1. Modules off, infection 0 → asexual wins; infection ~70%, mating radius 50% → sexual usually persists.
+2. Mendelian on + selfing present → `het self` / Heterozygosity plot falls toward 0 while sexual het stays higher.
+3. `release-offspring?` on → `# free` parasites rises; mutation 0 / 0.1 / 1.0 is the Morran-style contrast (selfing wins when parasites cannot track).
+4. Salinity on, west≈0 east≈70, patch-display=`infection` then `strategies` → asexual west, sexual east; boundary monitors move with the ramp.
+5. Temperature on + cold penalty → sexuals struggle in the cold (south); selfing can take that habitat.
+
+**Suggested interactive tuning order (you drive the knobs):**
+1. Confirm baseline (all switches off) still gives the Red Queen result at infection 70%.
+2. Turn on `mendelian-segregation?` and raise `initial-percent-self-fertilizing`; watch Heterozygosity.
+3. Turn on `release-offspring?`; compare mutation 0 vs 0.1 vs 1.0.
+4. Set patch-display to `infection`, turn on salinity, scrub west/east/width/center until the field looks right, then switch to `strategies` and run.
+5. Add temperature + cold penalty last; use `mate-radius` display to verify the south shrinks search.
+
+BehaviorSpace E0–E5 remain the formal sweep; use this Interface path to choose the values those experiments should center on.
+]]></info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="asexual left" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="50" y="159"></point>
+        <point x="30" y="83"></point>
+        <point x="35" y="82"></point>
+        <point x="60" y="149"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="69" y="146"></point>
+        <point x="71" y="72"></point>
+        <point x="78" y="73"></point>
+        <point x="81" y="148"></point>
+      </polygon>
+      <circle x="12" y="53" marked="true" color="-1920102913" diameter="36" filled="true"></circle>
+      <circle x="55" y="43" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="17" y="58" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="61" y="49" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="24" y="66" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="67" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="154" y="193"></point>
+        <point x="121" y="178"></point>
+        <point x="108" y="166"></point>
+        <point x="103" y="130"></point>
+        <point x="104" y="99"></point>
+        <point x="119" y="70"></point>
+        <point x="134" y="50"></point>
+        <point x="148" y="37"></point>
+        <point x="163" y="29"></point>
+        <point x="181" y="24"></point>
+        <point x="205" y="27"></point>
+        <point x="226" y="44"></point>
+        <point x="250" y="74"></point>
+        <point x="265" y="121"></point>
+        <point x="255" y="178"></point>
+        <point x="231" y="209"></point>
+        <point x="215" y="208"></point>
+        <point x="194" y="204"></point>
+        <point x="163" y="196"></point>
+        <point x="153" y="169"></point>
+        <point x="154" y="155"></point>
+        <point x="159" y="142"></point>
+        <point x="167" y="136"></point>
+        <point x="179" y="132"></point>
+        <point x="194" y="133"></point>
+        <point x="204" y="139"></point>
+        <point x="211" y="149"></point>
+        <point x="212" y="161"></point>
+        <point x="209" y="172"></point>
+        <point x="204" y="177"></point>
+        <point x="197" y="179"></point>
+        <point x="190" y="176"></point>
+        <point x="186" y="170"></point>
+        <point x="187" y="160"></point>
+        <point x="180" y="167"></point>
+        <point x="182" y="177"></point>
+        <point x="190" y="185"></point>
+        <point x="201" y="186"></point>
+        <point x="209" y="182"></point>
+        <point x="215" y="175"></point>
+        <point x="218" y="165"></point>
+        <point x="219" y="153"></point>
+        <point x="214" y="140"></point>
+        <point x="201" y="129"></point>
+        <point x="185" y="125"></point>
+        <point x="174" y="127"></point>
+        <point x="162" y="132"></point>
+        <point x="152" y="140"></point>
+        <point x="147" y="152"></point>
+        <point x="146" y="163"></point>
+        <point x="149" y="178"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="47" y="152"></point>
+        <point x="41" y="165"></point>
+        <point x="37" y="185"></point>
+        <point x="36" y="201"></point>
+        <point x="39" y="216"></point>
+        <point x="46" y="230"></point>
+        <point x="52" y="244"></point>
+        <point x="78" y="244"></point>
+        <point x="134" y="247"></point>
+        <point x="190" y="244"></point>
+        <point x="270" y="245"></point>
+        <point x="285" y="245"></point>
+        <point x="276" y="236"></point>
+        <point x="269" y="233"></point>
+        <point x="265" y="230"></point>
+        <point x="260" y="224"></point>
+        <point x="250" y="220"></point>
+        <point x="243" y="218"></point>
+        <point x="232" y="215"></point>
+        <point x="208" y="213"></point>
+        <point x="180" y="206"></point>
+        <point x="163" y="203"></point>
+        <point x="133" y="189"></point>
+        <point x="112" y="178"></point>
+        <point x="90" y="154"></point>
+        <point x="85" y="147"></point>
+        <point x="77" y="143"></point>
+        <point x="63" y="141"></point>
+        <point x="50" y="149"></point>
+        <point x="46" y="154"></point>
+      </polygon>
+      <circle x="28" y="174" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="29" y="198" marked="true" color="-1920102913" diameter="24" filled="true"></circle>
+      <circle x="40" y="217" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="34" y="152" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+    </shape>
+    <shape name="self-fertile left" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="50" y="159"></point>
+        <point x="30" y="83"></point>
+        <point x="35" y="82"></point>
+        <point x="60" y="149"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="69" y="146"></point>
+        <point x="71" y="72"></point>
+        <point x="78" y="73"></point>
+        <point x="81" y="148"></point>
+      </polygon>
+      <circle x="12" y="53" marked="true" color="-1920102913" diameter="36" filled="true"></circle>
+      <circle x="55" y="43" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="17" y="58" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="61" y="49" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="24" y="66" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="67" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="154" y="193"></point>
+        <point x="121" y="178"></point>
+        <point x="108" y="166"></point>
+        <point x="103" y="130"></point>
+        <point x="104" y="99"></point>
+        <point x="119" y="70"></point>
+        <point x="134" y="50"></point>
+        <point x="148" y="37"></point>
+        <point x="163" y="29"></point>
+        <point x="181" y="24"></point>
+        <point x="205" y="27"></point>
+        <point x="226" y="44"></point>
+        <point x="250" y="74"></point>
+        <point x="265" y="121"></point>
+        <point x="255" y="178"></point>
+        <point x="231" y="209"></point>
+        <point x="215" y="208"></point>
+        <point x="194" y="204"></point>
+        <point x="163" y="196"></point>
+        <point x="153" y="169"></point>
+        <point x="154" y="155"></point>
+        <point x="159" y="142"></point>
+        <point x="167" y="136"></point>
+        <point x="179" y="132"></point>
+        <point x="194" y="133"></point>
+        <point x="204" y="139"></point>
+        <point x="211" y="149"></point>
+        <point x="212" y="161"></point>
+        <point x="209" y="172"></point>
+        <point x="204" y="177"></point>
+        <point x="197" y="179"></point>
+        <point x="190" y="176"></point>
+        <point x="186" y="170"></point>
+        <point x="187" y="160"></point>
+        <point x="180" y="167"></point>
+        <point x="182" y="177"></point>
+        <point x="190" y="185"></point>
+        <point x="201" y="186"></point>
+        <point x="209" y="182"></point>
+        <point x="215" y="175"></point>
+        <point x="218" y="165"></point>
+        <point x="219" y="153"></point>
+        <point x="214" y="140"></point>
+        <point x="201" y="129"></point>
+        <point x="185" y="125"></point>
+        <point x="174" y="127"></point>
+        <point x="162" y="132"></point>
+        <point x="152" y="140"></point>
+        <point x="147" y="152"></point>
+        <point x="146" y="163"></point>
+        <point x="149" y="178"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="47" y="152"></point>
+        <point x="41" y="165"></point>
+        <point x="37" y="185"></point>
+        <point x="36" y="201"></point>
+        <point x="39" y="216"></point>
+        <point x="46" y="230"></point>
+        <point x="52" y="244"></point>
+        <point x="78" y="244"></point>
+        <point x="134" y="247"></point>
+        <point x="190" y="244"></point>
+        <point x="270" y="245"></point>
+        <point x="285" y="245"></point>
+        <point x="276" y="236"></point>
+        <point x="269" y="233"></point>
+        <point x="265" y="230"></point>
+        <point x="260" y="224"></point>
+        <point x="250" y="220"></point>
+        <point x="243" y="218"></point>
+        <point x="232" y="215"></point>
+        <point x="208" y="213"></point>
+        <point x="180" y="206"></point>
+        <point x="163" y="203"></point>
+        <point x="133" y="189"></point>
+        <point x="112" y="178"></point>
+        <point x="90" y="154"></point>
+        <point x="85" y="147"></point>
+        <point x="77" y="143"></point>
+        <point x="63" y="141"></point>
+        <point x="50" y="149"></point>
+        <point x="46" y="154"></point>
+      </polygon>
+      <circle x="28" y="174" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="29" y="198" marked="true" color="-1920102913" diameter="24" filled="true"></circle>
+      <circle x="40" y="217" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="34" y="152" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+    </shape>
+    <shape name="asexual right" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="250" y="159"></point>
+        <point x="270" y="83"></point>
+        <point x="265" y="82"></point>
+        <point x="240" y="149"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="231" y="146"></point>
+        <point x="229" y="72"></point>
+        <point x="222" y="73"></point>
+        <point x="219" y="148"></point>
+      </polygon>
+      <circle x="252" y="53" marked="true" color="-1920102913" diameter="36" filled="true"></circle>
+      <circle x="207" y="43" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="257" y="58" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="213" y="49" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="264" y="66" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="221" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="146" y="193"></point>
+        <point x="179" y="178"></point>
+        <point x="192" y="166"></point>
+        <point x="197" y="130"></point>
+        <point x="196" y="99"></point>
+        <point x="181" y="70"></point>
+        <point x="166" y="50"></point>
+        <point x="152" y="37"></point>
+        <point x="137" y="29"></point>
+        <point x="119" y="24"></point>
+        <point x="95" y="27"></point>
+        <point x="74" y="44"></point>
+        <point x="50" y="74"></point>
+        <point x="35" y="121"></point>
+        <point x="45" y="178"></point>
+        <point x="69" y="209"></point>
+        <point x="85" y="208"></point>
+        <point x="106" y="204"></point>
+        <point x="137" y="196"></point>
+        <point x="147" y="169"></point>
+        <point x="146" y="155"></point>
+        <point x="141" y="142"></point>
+        <point x="133" y="136"></point>
+        <point x="121" y="132"></point>
+        <point x="106" y="133"></point>
+        <point x="96" y="139"></point>
+        <point x="89" y="149"></point>
+        <point x="88" y="161"></point>
+        <point x="91" y="172"></point>
+        <point x="96" y="177"></point>
+        <point x="103" y="179"></point>
+        <point x="110" y="176"></point>
+        <point x="114" y="170"></point>
+        <point x="113" y="160"></point>
+        <point x="120" y="167"></point>
+        <point x="118" y="177"></point>
+        <point x="110" y="185"></point>
+        <point x="99" y="186"></point>
+        <point x="91" y="182"></point>
+        <point x="85" y="175"></point>
+        <point x="82" y="165"></point>
+        <point x="81" y="153"></point>
+        <point x="86" y="140"></point>
+        <point x="99" y="129"></point>
+        <point x="115" y="125"></point>
+        <point x="126" y="127"></point>
+        <point x="138" y="132"></point>
+        <point x="148" y="140"></point>
+        <point x="153" y="152"></point>
+        <point x="154" y="163"></point>
+        <point x="151" y="178"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="253" y="152"></point>
+        <point x="259" y="165"></point>
+        <point x="263" y="185"></point>
+        <point x="264" y="201"></point>
+        <point x="261" y="216"></point>
+        <point x="254" y="230"></point>
+        <point x="248" y="244"></point>
+        <point x="222" y="244"></point>
+        <point x="166" y="247"></point>
+        <point x="110" y="244"></point>
+        <point x="30" y="245"></point>
+        <point x="15" y="245"></point>
+        <point x="24" y="236"></point>
+        <point x="31" y="233"></point>
+        <point x="35" y="230"></point>
+        <point x="40" y="224"></point>
+        <point x="50" y="220"></point>
+        <point x="57" y="218"></point>
+        <point x="68" y="215"></point>
+        <point x="92" y="213"></point>
+        <point x="120" y="206"></point>
+        <point x="137" y="203"></point>
+        <point x="167" y="189"></point>
+        <point x="188" y="178"></point>
+        <point x="210" y="154"></point>
+        <point x="215" y="147"></point>
+        <point x="223" y="143"></point>
+        <point x="237" y="141"></point>
+        <point x="250" y="149"></point>
+        <point x="254" y="154"></point>
+      </polygon>
+      <circle x="245" y="174" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="247" y="198" marked="true" color="-1920102913" diameter="24" filled="true"></circle>
+      <circle x="233" y="217" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="239" y="152" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+    </shape>
+    <shape name="self-fertile right" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="250" y="159"></point>
+        <point x="270" y="83"></point>
+        <point x="265" y="82"></point>
+        <point x="240" y="149"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="231" y="146"></point>
+        <point x="229" y="72"></point>
+        <point x="222" y="73"></point>
+        <point x="219" y="148"></point>
+      </polygon>
+      <circle x="252" y="53" marked="true" color="-1920102913" diameter="36" filled="true"></circle>
+      <circle x="207" y="43" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="257" y="58" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="213" y="49" marked="false" color="-1" diameter="26" filled="true"></circle>
+      <circle x="264" y="66" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="221" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="146" y="193"></point>
+        <point x="179" y="178"></point>
+        <point x="192" y="166"></point>
+        <point x="197" y="130"></point>
+        <point x="196" y="99"></point>
+        <point x="181" y="70"></point>
+        <point x="166" y="50"></point>
+        <point x="152" y="37"></point>
+        <point x="137" y="29"></point>
+        <point x="119" y="24"></point>
+        <point x="95" y="27"></point>
+        <point x="74" y="44"></point>
+        <point x="50" y="74"></point>
+        <point x="35" y="121"></point>
+        <point x="45" y="178"></point>
+        <point x="69" y="209"></point>
+        <point x="85" y="208"></point>
+        <point x="106" y="204"></point>
+        <point x="137" y="196"></point>
+        <point x="147" y="169"></point>
+        <point x="146" y="155"></point>
+        <point x="141" y="142"></point>
+        <point x="133" y="136"></point>
+        <point x="121" y="132"></point>
+        <point x="106" y="133"></point>
+        <point x="96" y="139"></point>
+        <point x="89" y="149"></point>
+        <point x="88" y="161"></point>
+        <point x="91" y="172"></point>
+        <point x="96" y="177"></point>
+        <point x="103" y="179"></point>
+        <point x="110" y="176"></point>
+        <point x="114" y="170"></point>
+        <point x="113" y="160"></point>
+        <point x="120" y="167"></point>
+        <point x="118" y="177"></point>
+        <point x="110" y="185"></point>
+        <point x="99" y="186"></point>
+        <point x="91" y="182"></point>
+        <point x="85" y="175"></point>
+        <point x="82" y="165"></point>
+        <point x="81" y="153"></point>
+        <point x="86" y="140"></point>
+        <point x="99" y="129"></point>
+        <point x="115" y="125"></point>
+        <point x="126" y="127"></point>
+        <point x="138" y="132"></point>
+        <point x="148" y="140"></point>
+        <point x="153" y="152"></point>
+        <point x="154" y="163"></point>
+        <point x="151" y="178"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="253" y="152"></point>
+        <point x="259" y="165"></point>
+        <point x="263" y="185"></point>
+        <point x="264" y="201"></point>
+        <point x="261" y="216"></point>
+        <point x="254" y="230"></point>
+        <point x="248" y="244"></point>
+        <point x="222" y="244"></point>
+        <point x="166" y="247"></point>
+        <point x="110" y="244"></point>
+        <point x="30" y="245"></point>
+        <point x="15" y="245"></point>
+        <point x="24" y="236"></point>
+        <point x="31" y="233"></point>
+        <point x="35" y="230"></point>
+        <point x="40" y="224"></point>
+        <point x="50" y="220"></point>
+        <point x="57" y="218"></point>
+        <point x="68" y="215"></point>
+        <point x="92" y="213"></point>
+        <point x="120" y="206"></point>
+        <point x="137" y="203"></point>
+        <point x="167" y="189"></point>
+        <point x="188" y="178"></point>
+        <point x="210" y="154"></point>
+        <point x="215" y="147"></point>
+        <point x="223" y="143"></point>
+        <point x="237" y="141"></point>
+        <point x="250" y="149"></point>
+        <point x="254" y="154"></point>
+      </polygon>
+      <circle x="245" y="174" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="247" y="198" marked="true" color="-1920102913" diameter="24" filled="true"></circle>
+      <circle x="233" y="217" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+      <circle x="239" y="152" marked="true" color="-1920102913" diameter="27" filled="true"></circle>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="female left" rotatable="false" editableColorIndex="0">
+      <circle x="65" y="71" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <circle x="24" y="80" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="255" y="240"></point>
+      </polygon>
+      <circle x="13" y="56" marked="true" color="-1920102913" diameter="30" filled="true"></circle>
+      <circle x="56" y="47" marked="true" color="-1920102913" diameter="30" filled="true"></circle>
+      <circle x="17" y="60" marked="false" color="-1" diameter="22" filled="true"></circle>
+      <circle x="61" y="52" marked="false" color="-1" diameter="20" filled="true"></circle>
+      <circle x="21" y="65" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="64" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="146" y="186"></point>
+        <point x="121" y="173"></point>
+        <point x="106" y="158"></point>
+        <point x="100" y="128"></point>
+        <point x="106" y="98"></point>
+        <point x="119" y="77"></point>
+        <point x="136" y="62"></point>
+        <point x="152" y="51"></point>
+        <point x="173" y="45"></point>
+        <point x="195" y="44"></point>
+        <point x="229" y="53"></point>
+        <point x="257" y="75"></point>
+        <point x="275" y="108"></point>
+        <point x="280" y="149"></point>
+        <point x="263" y="184"></point>
+        <point x="241" y="203"></point>
+        <point x="194" y="203"></point>
+        <point x="155" y="189"></point>
+        <point x="145" y="164"></point>
+        <point x="142" y="141"></point>
+        <point x="149" y="119"></point>
+        <point x="164" y="107"></point>
+        <point x="181" y="102"></point>
+        <point x="201" y="103"></point>
+        <point x="221" y="114"></point>
+        <point x="228" y="130"></point>
+        <point x="229" y="146"></point>
+        <point x="222" y="163"></point>
+        <point x="211" y="170"></point>
+        <point x="196" y="168"></point>
+        <point x="186" y="162"></point>
+        <point x="182" y="152"></point>
+        <point x="187" y="143"></point>
+        <point x="196" y="137"></point>
+        <point x="188" y="135"></point>
+        <point x="177" y="143"></point>
+        <point x="175" y="158"></point>
+        <point x="185" y="172"></point>
+        <point x="202" y="177"></point>
+        <point x="218" y="176"></point>
+        <point x="230" y="163"></point>
+        <point x="236" y="147"></point>
+        <point x="236" y="130"></point>
+        <point x="230" y="114"></point>
+        <point x="214" y="101"></point>
+        <point x="194" y="95"></point>
+        <point x="173" y="96"></point>
+        <point x="153" y="105"></point>
+        <point x="139" y="121"></point>
+        <point x="135" y="139"></point>
+        <point x="136" y="158"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="45" y="135"></point>
+        <point x="30" y="153"></point>
+        <point x="25" y="175"></point>
+        <point x="24" y="194"></point>
+        <point x="27" y="210"></point>
+        <point x="33" y="225"></point>
+        <point x="48" y="239"></point>
+        <point x="53" y="240"></point>
+        <point x="105" y="240"></point>
+        <point x="174" y="243"></point>
+        <point x="276" y="240"></point>
+        <point x="285" y="240"></point>
+        <point x="278" y="230"></point>
+        <point x="269" y="220"></point>
+        <point x="260" y="215"></point>
+        <point x="251" y="212"></point>
+        <point x="242" y="211"></point>
+        <point x="195" y="210"></point>
+        <point x="147" y="194"></point>
+        <point x="118" y="180"></point>
+        <point x="88" y="149"></point>
+        <point x="78" y="136"></point>
+        <point x="68" y="132"></point>
+        <point x="58" y="132"></point>
+        <point x="51" y="133"></point>
+      </polygon>
+      <circle x="31" y="129" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="64" y="124" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="65" y="112" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="27" y="118" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="25" y="108" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="66" y="100" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="24" y="97" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="24" y="88" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <circle x="66" y="90" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="66" y="81" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+    </shape>
+    <shape name="female right" rotatable="false" editableColorIndex="0">
+      <circle x="223" y="71" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <circle x="264" y="80" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="240"></point>
+        <point x="60" y="210"></point>
+        <point x="45" y="240"></point>
+      </polygon>
+      <circle x="257" y="56" marked="true" color="-1920102913" diameter="30" filled="true"></circle>
+      <circle x="214" y="47" marked="true" color="-1920102913" diameter="30" filled="true"></circle>
+      <circle x="261" y="60" marked="false" color="-1" diameter="22" filled="true"></circle>
+      <circle x="219" y="52" marked="false" color="-1" diameter="20" filled="true"></circle>
+      <circle x="267" y="65" marked="false" color="255" diameter="12" filled="true"></circle>
+      <circle x="224" y="56" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="154" y="186"></point>
+        <point x="179" y="173"></point>
+        <point x="194" y="158"></point>
+        <point x="200" y="128"></point>
+        <point x="194" y="98"></point>
+        <point x="181" y="77"></point>
+        <point x="164" y="62"></point>
+        <point x="148" y="51"></point>
+        <point x="127" y="45"></point>
+        <point x="105" y="44"></point>
+        <point x="71" y="53"></point>
+        <point x="43" y="75"></point>
+        <point x="25" y="108"></point>
+        <point x="20" y="149"></point>
+        <point x="37" y="184"></point>
+        <point x="59" y="203"></point>
+        <point x="106" y="203"></point>
+        <point x="145" y="189"></point>
+        <point x="155" y="164"></point>
+        <point x="158" y="141"></point>
+        <point x="151" y="119"></point>
+        <point x="136" y="107"></point>
+        <point x="119" y="102"></point>
+        <point x="99" y="103"></point>
+        <point x="79" y="114"></point>
+        <point x="72" y="130"></point>
+        <point x="71" y="146"></point>
+        <point x="78" y="163"></point>
+        <point x="89" y="170"></point>
+        <point x="104" y="168"></point>
+        <point x="114" y="162"></point>
+        <point x="118" y="152"></point>
+        <point x="113" y="143"></point>
+        <point x="104" y="137"></point>
+        <point x="112" y="135"></point>
+        <point x="123" y="143"></point>
+        <point x="125" y="158"></point>
+        <point x="115" y="172"></point>
+        <point x="98" y="177"></point>
+        <point x="82" y="176"></point>
+        <point x="70" y="163"></point>
+        <point x="64" y="147"></point>
+        <point x="64" y="130"></point>
+        <point x="70" y="114"></point>
+        <point x="86" y="101"></point>
+        <point x="106" y="95"></point>
+        <point x="127" y="96"></point>
+        <point x="147" y="105"></point>
+        <point x="161" y="121"></point>
+        <point x="165" y="139"></point>
+        <point x="164" y="158"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="255" y="135"></point>
+        <point x="270" y="153"></point>
+        <point x="275" y="175"></point>
+        <point x="276" y="194"></point>
+        <point x="273" y="210"></point>
+        <point x="267" y="225"></point>
+        <point x="252" y="239"></point>
+        <point x="247" y="240"></point>
+        <point x="195" y="240"></point>
+        <point x="126" y="243"></point>
+        <point x="24" y="240"></point>
+        <point x="15" y="240"></point>
+        <point x="22" y="230"></point>
+        <point x="31" y="220"></point>
+        <point x="40" y="215"></point>
+        <point x="49" y="212"></point>
+        <point x="58" y="211"></point>
+        <point x="105" y="210"></point>
+        <point x="153" y="194"></point>
+        <point x="182" y="180"></point>
+        <point x="212" y="149"></point>
+        <point x="222" y="136"></point>
+        <point x="232" y="132"></point>
+        <point x="242" y="132"></point>
+        <point x="249" y="133"></point>
+      </polygon>
+      <circle x="253" y="129" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="220" y="124" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="219" y="112" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="257" y="118" marked="true" color="-1920102913" diameter="16" filled="true"></circle>
+      <circle x="261" y="108" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="220" y="100" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="262" y="97" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="264" y="88" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+      <circle x="220" y="90" marked="true" color="-1920102913" diameter="14" filled="true"></circle>
+      <circle x="222" y="81" marked="true" color="-1920102913" diameter="12" filled="true"></circle>
+    </shape>
+    <shape name="male left" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="255" y="240"></point>
+      </polygon>
+      <circle x="18" y="78" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="60" y="71" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="40" y="100"></point>
+        <point x="45" y="135"></point>
+        <point x="30" y="180"></point>
+        <point x="75" y="240"></point>
+        <point x="285" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="195" y="210"></point>
+        <point x="150" y="195"></point>
+        <point x="120" y="180"></point>
+        <point x="90" y="150"></point>
+        <point x="79" y="91"></point>
+        <point x="75" y="135"></point>
+        <point x="60" y="135"></point>
+      </polygon>
+      <circle x="25" y="86" marked="false" color="-1" diameter="24" filled="true"></circle>
+      <circle x="67" y="79" marked="false" color="-1" diameter="24" filled="true"></circle>
+      <circle x="72" y="85" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="151" y="189"></point>
+        <point x="121" y="174"></point>
+        <point x="107" y="158"></point>
+        <point x="105" y="75"></point>
+        <point x="150" y="30"></point>
+        <point x="210" y="15"></point>
+        <point x="270" y="60"></point>
+        <point x="285" y="150"></point>
+        <point x="242" y="204"></point>
+        <point x="195" y="203"></point>
+        <point x="158" y="191"></point>
+        <point x="145" y="150"></point>
+        <point x="170" y="115"></point>
+        <point x="213" y="114"></point>
+        <point x="228" y="135"></point>
+        <point x="228" y="165"></point>
+        <point x="189" y="165"></point>
+        <point x="188" y="146"></point>
+        <point x="181" y="146"></point>
+        <point x="182" y="172"></point>
+        <point x="234" y="172"></point>
+        <point x="236" y="134"></point>
+        <point x="219" y="106"></point>
+        <point x="195" y="105"></point>
+        <point x="167" y="106"></point>
+        <point x="147" y="134"></point>
+        <point x="135" y="150"></point>
+      </polygon>
+      <circle x="30" y="92" marked="false" color="255" diameter="12" filled="true"></circle>
+    </shape>
+    <shape name="male right" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="240"></point>
+        <point x="60" y="210"></point>
+        <point x="45" y="240"></point>
+      </polygon>
+      <circle x="244" y="78" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="202" y="71" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="260" y="100"></point>
+        <point x="255" y="135"></point>
+        <point x="270" y="180"></point>
+        <point x="225" y="240"></point>
+        <point x="15" y="240"></point>
+        <point x="60" y="210"></point>
+        <point x="105" y="210"></point>
+        <point x="150" y="195"></point>
+        <point x="180" y="180"></point>
+        <point x="210" y="150"></point>
+        <point x="221" y="91"></point>
+        <point x="225" y="135"></point>
+        <point x="240" y="135"></point>
+      </polygon>
+      <circle x="251" y="86" marked="false" color="-1" diameter="24" filled="true"></circle>
+      <circle x="209" y="79" marked="false" color="-1" diameter="24" filled="true"></circle>
+      <circle x="216" y="85" marked="false" color="255" diameter="12" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="149" y="189"></point>
+        <point x="179" y="174"></point>
+        <point x="193" y="158"></point>
+        <point x="195" y="75"></point>
+        <point x="150" y="30"></point>
+        <point x="90" y="15"></point>
+        <point x="30" y="60"></point>
+        <point x="15" y="150"></point>
+        <point x="58" y="204"></point>
+        <point x="105" y="203"></point>
+        <point x="142" y="191"></point>
+        <point x="155" y="150"></point>
+        <point x="130" y="115"></point>
+        <point x="87" y="114"></point>
+        <point x="72" y="135"></point>
+        <point x="72" y="165"></point>
+        <point x="111" y="165"></point>
+        <point x="112" y="146"></point>
+        <point x="119" y="146"></point>
+        <point x="118" y="172"></point>
+        <point x="66" y="172"></point>
+        <point x="64" y="134"></point>
+        <point x="81" y="106"></point>
+        <point x="105" y="105"></point>
+        <point x="133" y="106"></point>
+        <point x="153" y="134"></point>
+        <point x="165" y="150"></point>
+      </polygon>
+      <circle x="258" y="92" marked="false" color="255" diameter="12" filled="true"></circle>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <hubNetClient>
+    <view x="238" wrappingAllowedX="true" y="104" frameRate="30.0" minPycor="0" height="431" showTickCounter="true" patchSize="1.6833333333333333" fontSize="13" wrappingAllowedY="true" width="428" tickCounterLabel="ticks" maxPycor="299" updateMode="1" maxPxcor="299" minPxcor="0"></view>
+    <button x="91" actionKey="I" y="87" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="Up" width="62" sizeVersion="0"></button>
+    <button x="91" actionKey="K" y="153" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="Down" width="62" sizeVersion="0"></button>
+    <button x="153" actionKey="L" y="120" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="Right" width="62" sizeVersion="0"></button>
+    <button x="29" actionKey="J" y="120" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="Left" width="62" sizeVersion="0"></button>
+    <monitor x="146" precision="3" y="12" height="49" fontSize="11" display="LOCATED AT:" width="97" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="12" height="49" fontSize="11" display="YOU ARE GROUP:" width="119" sizeVersion="0"></monitor>
+    <monitor x="361" precision="3" y="12" height="49" fontSize="11" display="ADJACENT GROUP:" width="142" sizeVersion="0"></monitor>
+    <button x="522" actionKey="R" y="13" height="33" disableUntilTicks="false" forever="false" kind="Observer" display="reproduce now" width="127" sizeVersion="0"></button>
+    <monitor x="253" precision="3" y="12" height="49" fontSize="11" display="GENERATION:" width="97" sizeVersion="0"></monitor>
+    <monitor x="124" precision="5" y="198" height="49" fontSize="11" display="asexual %" width="101" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="252" height="49" fontSize="11" display="sexual %" width="101" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="306" height="49" fontSize="11" display="allele one %" width="101" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="306" height="49" fontSize="11" display="allele one count" width="100" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="361" height="49" fontSize="11" display="allele two %" width="101" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="361" height="49" fontSize="11" display="allele two count" width="100" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="415" height="49" fontSize="11" display="allele three %" width="102" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="415" height="49" fontSize="11" display="allele three count" width="100" sizeVersion="0"></monitor>
+    <monitor x="124" precision="3" y="469" height="49" fontSize="11" display="allele four %" width="102" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="469" height="49" fontSize="11" display="allele four count" width="100" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="198" height="49" fontSize="11" display="asexual count" width="100" sizeVersion="0"></monitor>
+    <monitor x="17" precision="3" y="252" height="49" fontSize="11" display="sexual count" width="100" sizeVersion="0"></monitor>
+    <note x="19" y="67" backgroundDark="0" fontSize="11" width="642" markdown="false" height="18" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">----------------------------------------------------------------------------------------------------------</note>
+    <note x="48" y="515" backgroundDark="0" fontSize="11" width="150" markdown="false" height="18" textColorDark="-1" textColorLight="-16777216" backgroundLight="0"></note>
+  </hubNetClient>
+  <previewCommands>setup repeat 75 [ go ]</previewCommands>
+  <experiments>
+    <experiment name="E0_baseline_check" repetitions="15" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="5000">
+      <setup>setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>count snails</metric>
+        <metric>count-asexual</metric>
+        <metric>count-sexual</metric>
+        <metric>count-selfing</metric>
+        <metric>count parasites</metric>
+        <metric>pct-asexual</metric>
+        <metric>pct-sexual</metric>
+        <metric>pct-selfing</metric>
+        <metric>mean-het-asexual</metric>
+        <metric>mean-het-sexual</metric>
+        <metric>mean-het-selfing</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="stop-simulation-at"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="show-parasites"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="patch-display"><value value="&quot;none&quot;"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-sexual"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-self-fertilizing"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="self-fertilizing-cost"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-carrying-capacity"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-fertility-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-mutation-rate"><value value="0.001"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="sexual-mating-radius"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-infection-chance"><value value="0"></value><value value="70"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="per-snail-parasite-capacity"><value value="5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-fertility-rate"><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mortality-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mutation-rate"><value value="0.1"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="mendelian-segregation?"><value value="false"></value><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="release-offspring?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-salinity-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-temperature-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-west"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-east"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-center"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-width"><value value="0.25"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="cold-mating-penalty"><value value="0"></value></enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="E1_three_strategies_uniform" repetitions="15" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="5000">
+      <setup>setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>count snails</metric>
+        <metric>count-asexual</metric>
+        <metric>count-sexual</metric>
+        <metric>count-selfing</metric>
+        <metric>count parasites</metric>
+        <metric>pct-asexual</metric>
+        <metric>pct-sexual</metric>
+        <metric>pct-selfing</metric>
+        <metric>mean-het-asexual</metric>
+        <metric>mean-het-sexual</metric>
+        <metric>mean-het-selfing</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="stop-simulation-at"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="show-parasites"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="patch-display"><value value="&quot;none&quot;"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-sexual"><value value="33"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-self-fertilizing"><value value="33"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="self-fertilizing-cost"><value value="0"></value><value value="0.25"></value><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-carrying-capacity"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-fertility-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-mutation-rate"><value value="0.001"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="sexual-mating-radius"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-infection-chance"><value value="0"></value><value value="40"></value><value value="70"></value><value value="100"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="per-snail-parasite-capacity"><value value="5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-fertility-rate"><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mortality-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mutation-rate"><value value="0.1"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="mendelian-segregation?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="release-offspring?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-salinity-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-temperature-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-west"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-east"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-center"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-width"><value value="0.25"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="cold-mating-penalty"><value value="0"></value></enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="E2_parasite_evolution_selfing" repetitions="15" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="5000">
+      <setup>setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>count snails</metric>
+        <metric>count-asexual</metric>
+        <metric>count-sexual</metric>
+        <metric>count-selfing</metric>
+        <metric>count parasites</metric>
+        <metric>pct-asexual</metric>
+        <metric>pct-sexual</metric>
+        <metric>pct-selfing</metric>
+        <metric>mean-het-asexual</metric>
+        <metric>mean-het-sexual</metric>
+        <metric>mean-het-selfing</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="stop-simulation-at"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="show-parasites"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="patch-display"><value value="&quot;none&quot;"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-sexual"><value value="33"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-self-fertilizing"><value value="33"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="self-fertilizing-cost"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-carrying-capacity"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-fertility-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-mutation-rate"><value value="0.001"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="sexual-mating-radius"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-infection-chance"><value value="70"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="per-snail-parasite-capacity"><value value="5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-fertility-rate"><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mortality-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mutation-rate"><value value="0"></value><value value="0.1"></value><value value="1"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="mendelian-segregation?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="release-offspring?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-salinity-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-temperature-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-west"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-east"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-center"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-width"><value value="0.25"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="cold-mating-penalty"><value value="0"></value></enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="E3a_salinity_sex_vs_asex" repetitions="15" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="10000">
+      <setup>setup</setup>
+      <go>go</go>
+      <runMetricsCondition>ticks mod 25 = 0</runMetricsCondition>
+      <metrics>
+        <metric>count snails</metric>
+        <metric>count-asexual</metric>
+        <metric>count-sexual</metric>
+        <metric>count-selfing</metric>
+        <metric>pct-asexual</metric>
+        <metric>pct-sexual</metric>
+        <metric>pct-selfing</metric>
+        <metric>boundary-position-asexual</metric>
+        <metric>boundary-width-asexual</metric>
+        <metric>boundary-position-sexual</metric>
+        <metric>boundary-width-sexual</metric>
+        <metric>strip-strategy-share "asexual" 0</metric>
+        <metric>strip-strategy-share "asexual" 5</metric>
+        <metric>strip-strategy-share "asexual" 10</metric>
+        <metric>strip-strategy-share "asexual" 15</metric>
+        <metric>strip-strategy-share "asexual" 19</metric>
+        <metric>strip-strategy-share "sexual" 0</metric>
+        <metric>strip-strategy-share "sexual" 5</metric>
+        <metric>strip-strategy-share "sexual" 10</metric>
+        <metric>strip-strategy-share "sexual" 15</metric>
+        <metric>strip-strategy-share "sexual" 19</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="stop-simulation-at"><value value="10000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="show-parasites"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="patch-display"><value value="&quot;none&quot;"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-sexual"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-self-fertilizing"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="self-fertilizing-cost"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-carrying-capacity"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-fertility-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-mutation-rate"><value value="0.001"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="sexual-mating-radius"><value value="15"></value><value value="50"></value><value value="100"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-infection-chance"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="per-snail-parasite-capacity"><value value="5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-fertility-rate"><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mortality-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mutation-rate"><value value="0.1"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="mendelian-segregation?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="release-offspring?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-salinity-gradient?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-temperature-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-west"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-east"><value value="100"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-center"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-width"><value value="0.1"></value><value value="0.25"></value><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="cold-mating-penalty"><value value="0"></value></enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="E3b_salinity_three_strategies" repetitions="15" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="10000">
+      <setup>setup</setup>
+      <go>go</go>
+      <runMetricsCondition>ticks mod 25 = 0</runMetricsCondition>
+      <metrics>
+        <metric>count snails</metric>
+        <metric>count-asexual</metric>
+        <metric>count-sexual</metric>
+        <metric>count-selfing</metric>
+        <metric>pct-asexual</metric>
+        <metric>pct-sexual</metric>
+        <metric>pct-selfing</metric>
+        <metric>boundary-position-asexual</metric>
+        <metric>boundary-width-asexual</metric>
+        <metric>boundary-position-sexual</metric>
+        <metric>boundary-width-sexual</metric>
+        <metric>boundary-position-selfing</metric>
+        <metric>boundary-width-selfing</metric>
+        <metric>strip-strategy-share "asexual" 0</metric>
+        <metric>strip-strategy-share "asexual" 10</metric>
+        <metric>strip-strategy-share "asexual" 19</metric>
+        <metric>strip-strategy-share "sexual" 0</metric>
+        <metric>strip-strategy-share "sexual" 10</metric>
+        <metric>strip-strategy-share "sexual" 19</metric>
+        <metric>strip-strategy-share "selfing" 0</metric>
+        <metric>strip-strategy-share "selfing" 10</metric>
+        <metric>strip-strategy-share "selfing" 19</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="stop-simulation-at"><value value="10000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="show-parasites"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="patch-display"><value value="&quot;none&quot;"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-sexual"><value value="33"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-self-fertilizing"><value value="33"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="self-fertilizing-cost"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-carrying-capacity"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-fertility-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-mutation-rate"><value value="0.001"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="sexual-mating-radius"><value value="15"></value><value value="50"></value><value value="100"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-infection-chance"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="per-snail-parasite-capacity"><value value="5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-fertility-rate"><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mortality-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mutation-rate"><value value="0.1"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="mendelian-segregation?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="release-offspring?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-salinity-gradient?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-temperature-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-west"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-east"><value value="100"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-center"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-width"><value value="0.1"></value><value value="0.25"></value><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="cold-mating-penalty"><value value="0"></value></enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="E4_boundary_vs_infection_range" repetitions="15" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="10000">
+      <setup>setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>count snails</metric>
+        <metric>count-asexual</metric>
+        <metric>count-sexual</metric>
+        <metric>count-selfing</metric>
+        <metric>pct-asexual</metric>
+        <metric>pct-sexual</metric>
+        <metric>pct-selfing</metric>
+        <metric>boundary-position-asexual</metric>
+        <metric>boundary-width-asexual</metric>
+        <metric>boundary-position-sexual</metric>
+        <metric>boundary-width-sexual</metric>
+        <metric>boundary-position-selfing</metric>
+        <metric>boundary-width-selfing</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="stop-simulation-at"><value value="10000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="show-parasites"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="patch-display"><value value="&quot;none&quot;"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-sexual"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-self-fertilizing"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="self-fertilizing-cost"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-carrying-capacity"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-fertility-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-mutation-rate"><value value="0.001"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="sexual-mating-radius"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-infection-chance"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="per-snail-parasite-capacity"><value value="5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-fertility-rate"><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mortality-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mutation-rate"><value value="0"></value><value value="0.1"></value><value value="1"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="mendelian-segregation?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="release-offspring?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-salinity-gradient?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-temperature-gradient?"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-west"><value value="0"></value><value value="20"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-east"><value value="70"></value><value value="100"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-center"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-width"><value value="0.25"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="cold-mating-penalty"><value value="0"></value></enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="E5_temperature_gradient" repetitions="15" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="10000">
+      <setup>setup</setup>
+      <go>go</go>
+      <runMetricsCondition>ticks mod 25 = 0</runMetricsCondition>
+      <metrics>
+        <metric>count snails</metric>
+        <metric>count-asexual</metric>
+        <metric>count-sexual</metric>
+        <metric>count-selfing</metric>
+        <metric>pct-asexual</metric>
+        <metric>pct-sexual</metric>
+        <metric>pct-selfing</metric>
+        <metric>mean-het-asexual</metric>
+        <metric>mean-het-sexual</metric>
+        <metric>mean-het-selfing</metric>
+        <metric>boundary-position-asexual</metric>
+        <metric>boundary-width-asexual</metric>
+        <metric>boundary-position-sexual</metric>
+        <metric>boundary-width-sexual</metric>
+        <metric>boundary-position-selfing</metric>
+        <metric>boundary-width-selfing</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="stop-simulation-at"><value value="10000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="show-parasites"><value value="false"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="patch-display"><value value="&quot;none&quot;"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-sexual"><value value="33"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="initial-percent-self-fertilizing"><value value="33"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="self-fertilizing-cost"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-carrying-capacity"><value value="5000"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-fertility-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="snail-mutation-rate"><value value="0.001"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="sexual-mating-radius"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-infection-chance"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="per-snail-parasite-capacity"><value value="5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-fertility-rate"><value value="0.5"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mortality-rate"><value value="0.01"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="parasite-mutation-rate"><value value="0.1"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="mendelian-segregation?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="release-offspring?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-salinity-gradient?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="use-temperature-gradient?"><value value="true"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-west"><value value="0"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="infection-chance-east"><value value="100"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-center"><value value="50"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="gradient-width"><value value="0.25"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="cold-mating-penalty"><value value="0"></value><value value="0.5"></value><value value="1"></value></enumeratedValueSet>
+      </constants>
+    </experiment>
+</experiments>
+</model>
